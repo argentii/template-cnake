@@ -3,6 +3,7 @@
 #include "../engine/step.hpp"
 #include "../engine/rng.hpp"
 #include "../engine/game.hpp"
+#include "../engine/render.hpp"
 
 namespace core_tests {
 using namespace ts;
@@ -271,5 +272,68 @@ static_assert(Length<Parts<I0>::Body_> == 3 && Parts<I0>::score == 0);
 static_assert(!Contains<Parts<I0>::FoodP, Parts<I0>::Body_> && InBounds<Parts<I0>::FoodP>);
 static_assert(!Same<Initial<1>, Initial<2>>);
 } // namespace game_tests
+
+namespace text_tests {
+using namespace ts;
+static_assert(StrEq(IntStr<0>(), "0"));
+static_assert(StrEq(IntStr<7>(), "7"));
+static_assert(StrEq(IntStr<10>(), "10"));
+static_assert(StrEq(IntStr<4294967295>(), "4294967295"));
+static_assert(StrEq(IntStr<-1>(), "-1"));
+static_assert(StrEq(IntStr<-305>(), "-305"));
+static_assert(StrEq(Concat(Lit("ab"), Lit(""), IntStr<12>(), Lit("c")), "ab12c"));
+static_assert(StrEq(Lit("xyz"), "xyz") && !StrEq(Lit("xyz"), "xy") && !StrEq(Lit("xyz"), "xya"));
+static_assert(Concat(Lit("hi"), Lit("!")).c[3] == '\0');
+} // namespace text_tests
+
+namespace render_tests {
+using namespace ts;
+static_assert(W == 16 && H == 12, "golden frame below assumes the default grid");
+
+using St = Game<Dir::Right, Food<10, 2>, Seed<1>, Score<12>,
+                Snake<P<3,1>, P<2,1>, P<1,1>, P<1,2>, P<0,2>>>;
+static_assert(StrEq(Render<St>::frame,
+    "+--------------------------------+\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. o o @ . . . . . . . . . . . . |\n"
+    "|o o . . . . . . . . * . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . @ |\n"
+    "+--------------------------------+\n"
+    " Score: 12\n") == false);  // sanity: a wrong frame must not match
+
+static_assert(StrEq(Render<St>::frame,
+    "+--------------------------------+\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. o o @ . . . . . . . . . . . . |\n"
+    "|o o . . . . . . . . * . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "|. . . . . . . . . . . . . . . . |\n"
+    "+--------------------------------+\n"
+    " Score: 12\n"));
+
+// Corner cells render (bounds of the paint loop)
+using Corners = Game<Dir::Down, Food<0, 0>, Seed<1>, Score<0>, Snake<P<W-1, H-1>, P<W-1, H-2>>>;
+static_assert(Render<Corners>::frame[RowLen + 1] == CellFood);
+static_assert(Render<Corners>::frame[H * RowLen + 2 * W - 1] == CellHead);
+static_assert(Render<Corners>::frame[(H - 1) * RowLen + 2 * W - 1] == CellBody);
+
+static_assert(StrEq(Render<GameOver<5>>::frame, "\n  *** GAME OVER ***\n  Final score: 5\n\n"));
+static_assert(StrEq(Render<GameOver<191, true>>::frame, "\n  *** YOU WIN! ***\n  Final score: 191\n\n"));
+} // namespace render_tests
 
 int main() {}
