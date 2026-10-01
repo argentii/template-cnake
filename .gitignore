@@ -1,0 +1,5 @@
+build/
+tmp/
+*.o
+*.pch
+*.json
