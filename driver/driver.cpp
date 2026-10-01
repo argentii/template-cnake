@@ -3,7 +3,7 @@
 // the key->slot table, the terminal flag and the successor headers all come
 // out of the frame binary B(S), which the template engine computed.
 //
-// usage: driver [--tick MS] [--seed N] [--script KEYS] [--no-delay] [--naive]
+// usage: driver [--tick MS (default 200, macOS 450)] [--seed N] [--script KEYS] [--no-delay] [--naive]
 //               [--root DIR] [--log FILE]
 //   --script  one input per tick: U D L R, or '.' for none; implies no terminal UI
 //   --no-delay  do not wait for the tick clock (replay as fast as compiles allow)
@@ -29,7 +29,13 @@ namespace {
 
 // ---- options ----------------------------------------------------------------
 struct Options {
+#ifdef __APPLE__
+    // macOS scans each new binary on first run, one at a time (~107 ms each);
+    // three per tick need ~400 ms. See PERF.md.
+    int tickMs = 450;
+#else
     int tickMs = 200;
+#endif
     unsigned seed = 1;
     bool scripted = false;
     std::string script;
@@ -420,6 +426,11 @@ Job spawnJob(const std::string& dir, bool initial) {
         int st = 0;
         while (waitpid(c, &st, 0) < 0 && errno == EINTR) {}
         if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) _exit(1);
+        // Record when the compile ended, for the timing log.
+        if (FILE* f = std::fopen((dir + "/compiled_at").c_str(), "w")) {
+            std::fprintf(f, "%.3f\n", nowMs());
+            std::fclose(f);
+        }
         execl(bin.c_str(), bin.c_str(), (char*)nullptr);  // warm run
         _exit(127);
     }
@@ -518,8 +529,14 @@ int runSpeculative() {
         for (int s = 0; s < 3; ++s)
             if (s != slot) cancelJob(jobs[s]);
         if (chosen.status != 0) die("compile failed in %s (status %d)", chosen.dir.c_str(), chosen.status);
-        logf("tick %d: pre %.1f ms, compile+warm %.1f ms, slot %d%s", tick, spawned - tickStart,
-             chosen.finished - chosen.started, slot, wasReady ? "" : " (waited)");
+        double compiledAt = chosen.finished;
+        if (FILE* f = std::fopen((chosen.dir + "/compiled_at").c_str(), "r")) {
+            if (std::fscanf(f, "%lf", &compiledAt) != 1) compiledAt = chosen.finished;
+            std::fclose(f);
+        }
+        logf("tick %d: pre %.1f ms, compile %.1f ms, warm %.1f ms, slot %d%s", tick,
+             spawned - tickStart, compiledAt - chosen.started, chosen.finished - compiledAt, slot,
+             wasReady ? "" : " (waited)");
         if (!wasReady && !opt.noDelay) {
             ++stalls;
             if (stall > worstStallMs) worstStallMs = stall;
@@ -533,6 +550,28 @@ int runSpeculative() {
             if (s != slot) removeDir(jobs[s].dir);
         cur = chosen.dir;
     }
+}
+
+// Remove run directories left by drivers that died without cleaning up
+// (signals and crashes skip normal cleanup; the handler must stay async-safe).
+void sweepStaleRuns() {
+    DIR* d = opendir("tmp");
+    if (!d) return;
+    while (dirent* e = readdir(d)) {
+        if (std::strncmp(e->d_name, "run-", 4) != 0) continue;
+        pid_t pid = (pid_t)std::atoi(e->d_name + 4);
+        if (pid <= 0 || (kill(pid, 0) != 0 && errno == ESRCH)) {
+            std::string run = std::string("tmp/") + e->d_name;
+            if (DIR* r = opendir(run.c_str())) {
+                while (dirent* t = readdir(r))
+                    if (t->d_name[0] != '.') removeDir(run + "/" + t->d_name);
+                closedir(r);
+            }
+            rmdir(run.c_str());
+            logf("swept stale %s", run.c_str());
+        }
+    }
+    closedir(d);
 }
 
 void usage() {
@@ -561,6 +600,7 @@ int main(int argc, char** argv) {
     std::string logDir = opt.log.substr(0, opt.log.find_last_of('/'));
     if (logDir != opt.log) mkdirP(logDir);
     logFile = std::fopen(opt.log.c_str(), "a");
+    sweepStaleRuns();
     workDir = "tmp/run-" + std::to_string(getpid());
     mkdirP(workDir);
     logf("start pid %d tick %d ms seed %u %s", getpid(), opt.tickMs, opt.seed,

@@ -29,3 +29,35 @@ applies to `dlopen` of a fresh dylib (3 fresh dylibs: 333 ms). So the spec's
 3-binaries-per-tick pipeline costs ~330 ms/tick on this machine regardless of
 compile speed. Exempting the terminal app under System Settings → Privacy &
 Security → Developer Tools removes the scan.
+Decision: keep the 3-binary architecture and raise the macOS default tick to
+**450 ms** (Linux stays at 200 ms). Measured stall rates with the real tick clock:
+
+| tick | stalls | notes |
+|---|---|---|
+| 350 ms | 14/39 | worst 94 ms |
+| 400 ms | 1/39 | worst 28 ms |
+| 450 ms | 0/39, 0/59 | quiet machine |
+| 450 ms | 35/87 | right after heavy test activity; scan p90 746 ms, max 1.2 s |
+
+The scan time depends on system state, not on our binary: stripping, dead-strip
+and copying an already-scanned binary all leave it at ~107 ms. Unsigned arm64
+binaries are killed. Stalls that do happen are logged to `tmp/driver.log`.
+
+## Milestone 10: compile time vs snake length
+
+`frame.cpp` compile + link, `-O0`, median of 7 (serpentine snake, 16x12 grid):
+
+| length | compile + link |
+|---|---|
+| 3 | 43 ms |
+| 20 | 45 ms |
+| 50 | 50 ms |
+| 100 | 64 ms |
+| 150 | 68 ms |
+
+`-ftime-trace` at length 100 (compile only, ~39 ms): template instantiation
+23 ms, constexpr evaluation (render + serialize text) 16 ms. No hot spot.
+
+Precompiled header for the engine + `<cstdio>`: saves 3–5 ms per compile. Not
+adopted: the ~110 ms per-binary scan is 20x larger, and a PCH adds a build step
+that must match flags exactly.
