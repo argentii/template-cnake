@@ -1,0 +1,434 @@
+// Runtime shell for Template Snake. It reads keys, keeps time, launches the
+// compiler and runs the binaries it produces. It does NO game logic: the frame,
+// the key->slot table, the terminal flag and the successor headers all come
+// out of the frame binary B(S), which the template engine computed.
+//
+// usage: driver [--tick MS] [--seed N] [--script KEYS] [--no-delay] [--naive]
+//               [--root DIR] [--log FILE]
+//   --script  one input per tick: U D L R, or '.' for none; implies no terminal UI
+//   --no-delay  do not wait for the tick clock (replay as fast as compiles allow)
+#include <cerrno>
+#include <csignal>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <string>
+#include <vector>
+
+#include <dirent.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <termios.h>
+#include <unistd.h>
+
+namespace {
+
+// ---- options ----------------------------------------------------------------
+struct Options {
+    int tickMs = 200;
+    unsigned seed = 1;
+    bool scripted = false;
+    std::string script;
+    bool noDelay = false;
+    bool naive = false;
+    std::string root = ".";
+    std::string log = "tmp/driver.log";
+};
+Options opt;
+
+// ---- clock & logging --------------------------------------------------------
+double nowMs() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+
+FILE* logFile = nullptr;
+void logf(const char* fmt, ...) {
+    if (!logFile) return;
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(logFile, fmt, ap);
+    va_end(ap);
+    std::fputc('\n', logFile);
+    std::fflush(logFile);
+}
+
+[[noreturn]] void die(const char* fmt, ...);
+
+// ---- terminal ---------------------------------------------------------------
+termios savedTermios;
+bool rawMode = false;
+
+void restoreTerminal() {
+    if (rawMode) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &savedTermios);
+        rawMode = false;
+        static const char show[] = "\x1b[?25h\n";
+        (void)!write(STDOUT_FILENO, show, sizeof show - 1);
+    }
+}
+
+void enterRawMode() {
+    if (!isatty(STDIN_FILENO)) die("stdin is not a terminal (use --script for non-interactive runs)");
+    tcgetattr(STDIN_FILENO, &savedTermios);
+    termios raw = savedTermios;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+    rawMode = true;
+    static const char hide[] = "\x1b[?25l\x1b[2J";
+    (void)!write(STDOUT_FILENO, hide, sizeof hide - 1);
+}
+
+// ---- child processes --------------------------------------------------------
+// Children run in their own process group so a compile (clang + ld) can be
+// killed as a unit.
+std::vector<pid_t> liveGroups;
+
+void forgetGroup(pid_t pg) {
+    for (size_t i = 0; i < liveGroups.size(); ++i)
+        if (liveGroups[i] == pg) { liveGroups.erase(liveGroups.begin() + i); return; }
+}
+
+void killAllChildren() {
+    for (pid_t pg : liveGroups) kill(-pg, SIGKILL);
+}
+
+void onSignal(int sig) {
+    // Async-signal-safe cleanup only.
+    for (pid_t pg : liveGroups) kill(-pg, SIGKILL);
+    if (rawMode) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &savedTermios);
+        static const char show[] = "\x1b[?25h\n";
+        (void)!write(STDOUT_FILENO, show, sizeof show - 1);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+void die(const char* fmt, ...) {
+    killAllChildren();
+    restoreTerminal();
+    va_list ap;
+    va_start(ap, fmt);
+    std::fputs("driver: ", stderr);
+    std::vfprintf(stderr, fmt, ap);
+    std::fputc('\n', stderr);
+    va_end(ap);
+    logf("fatal");
+    std::exit(1);
+}
+
+std::vector<char*> cargv(std::vector<std::string>& args) {
+    std::vector<char*> v;
+    for (auto& a : args) v.push_back(a.data());
+    v.push_back(nullptr);
+    return v;
+}
+
+// Run argv to completion; capture stdout into *out (if non-null). Returns exit status.
+int runCapture(std::vector<std::string> args, std::string* out) {
+    int fds[2];
+    if (pipe(fds) != 0) die("pipe: %s", std::strerror(errno));
+    pid_t pid = fork();
+    if (pid < 0) die("fork: %s", std::strerror(errno));
+    if (pid == 0) {
+        setpgid(0, 0);
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[0]);
+        close(fds[1]);
+        auto v = cargv(args);
+        execvp(v[0], v.data());
+        _exit(127);
+    }
+    setpgid(pid, pid);
+    liveGroups.push_back(pid);
+    close(fds[1]);
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(fds[0], buf, sizeof buf)) > 0 || (n < 0 && errno == EINTR))
+        if (n > 0 && out) out->append(buf, n);
+    close(fds[0]);
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    forgetGroup(pid);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+}
+
+// ---- files ------------------------------------------------------------------
+void mkdirP(const std::string& path) {
+    std::string cur;
+    for (size_t i = 0; i <= path.size(); ++i) {
+        if (i == path.size() || path[i] == '/') {
+            if (!cur.empty() && mkdir(cur.c_str(), 0755) != 0 && errno != EEXIST)
+                die("mkdir %s: %s", cur.c_str(), std::strerror(errno));
+        }
+        if (i < path.size()) cur += path[i];
+    }
+}
+
+// Remove a build directory (flat: it only ever holds files we or clang wrote).
+void removeDir(const std::string& path) {
+    DIR* d = opendir(path.c_str());
+    if (!d) return;
+    while (dirent* e = readdir(d)) {
+        if (!std::strcmp(e->d_name, ".") || !std::strcmp(e->d_name, "..")) continue;
+        unlink((path + "/" + e->d_name).c_str());
+    }
+    closedir(d);
+    rmdir(path.c_str());
+}
+
+void copyFile(const std::string& from, const std::string& to) {
+    FILE* in = std::fopen(from.c_str(), "rb");
+    if (!in) die("open %s: %s", from.c_str(), std::strerror(errno));
+    FILE* o = std::fopen(to.c_str(), "wb");
+    if (!o) die("open %s: %s", to.c_str(), std::strerror(errno));
+    char buf[8192];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, in)) > 0) std::fwrite(buf, 1, n, o);
+    std::fclose(in);
+    if (std::fclose(o) != 0) die("write %s", to.c_str());
+}
+
+// ---- the compiler -----------------------------------------------------------
+std::string workDir;
+
+// clang++ invocation that turns DIR/state.hpp into DIR/B.
+std::vector<std::string> compileCommand(const std::string& dir, bool initial) {
+    std::vector<std::string> a = {"clang++", "-std=c++20", "-O0", "-I" + dir};
+    if (initial) a.push_back("-DTS_SEED=" + std::to_string(opt.seed));
+    a.push_back(opt.root + "/frame.cpp");
+    a.push_back("-o");
+    a.push_back(dir + "/B");
+    return a;
+}
+
+void compileSync(const std::string& dir, bool initial) {
+    double t0 = nowMs();
+    std::string ignored;
+    int st = runCapture(compileCommand(dir, initial), &ignored);
+    if (st != 0) die("compile failed in %s (status %d)", dir.c_str(), st);
+    logf("compile %s: %.1f ms", dir.c_str(), nowMs() - t0);
+}
+
+// ---- the frame binary's outputs ----------------------------------------------
+struct Info {
+    int keys[5];
+    bool terminal;
+};
+
+// Parse "keys a b c d e\nterminal t\n". Pure lookup data, no interpretation.
+Info readInfo(const std::string& dir) {
+    std::string out;
+    if (runCapture({dir + "/B", "info"}, &out) != 0) die("B info failed in %s", dir.c_str());
+    Info in{};
+    int t = 0;
+    if (std::sscanf(out.c_str(), "keys %d %d %d %d %d terminal %d", &in.keys[0], &in.keys[1],
+                    &in.keys[2], &in.keys[3], &in.keys[4], &t) != 6)
+        die("bad info output: %s", out.c_str());
+    for (int k : in.keys)
+        if (k < 0 || k > 2) die("bad slot in info output: %s", out.c_str());
+    in.terminal = t != 0;
+    return in;
+}
+
+std::string readFrame(const std::string& dir) {
+    std::string out;
+    if (runCapture({dir + "/B", "frame"}, &out) != 0) die("B frame failed in %s", dir.c_str());
+    return out;
+}
+
+void emitSuccessors(const std::string& binDir, const std::string& outDir) {
+    if (runCapture({binDir + "/B", "emit", outDir}, nullptr) != 0) die("B emit failed in %s", binDir.c_str());
+}
+
+// ---- input --------------------------------------------------------------------
+// Key indices match the order of the key table: none, Up, Down, Left, Right.
+enum { KNone = 0, KUp = 1, KDown = 2, KLeft = 3, KRight = 4, KQuit = -1 };
+
+// Decode raw bytes into key indices; returns the last key seen (or KNone).
+// Handles arrow escape sequences (ESC [ A..D) and WASD.
+struct KeyDecoder {
+    int state = 0;  // 0 normal, 1 got ESC, 2 got ESC [
+    int last = KNone;
+    bool quit = false;
+    void feed(unsigned char c) {
+        if (state == 1) { state = (c == '[' || c == 'O') ? 2 : 0; return; }
+        if (state == 2) {
+            state = 0;
+            switch (c) {
+                case 'A': last = KUp; break;
+                case 'B': last = KDown; break;
+                case 'C': last = KRight; break;
+                case 'D': last = KLeft; break;
+            }
+            return;
+        }
+        switch (c) {
+            case 27: state = 1; break;
+            case 'w': case 'W': last = KUp; break;
+            case 's': case 'S': last = KDown; break;
+            case 'a': case 'A': last = KLeft; break;
+            case 'd': case 'D': last = KRight; break;
+            case 'q': case 'Q': case 3: quit = true; break;
+        }
+    }
+};
+KeyDecoder decoder;
+
+// Wait until the deadline, collecting keys. Calls onIdle(remainingMs) between polls.
+template<class F> void collectInput(double deadline, F onWake) {
+    for (;;) {
+        double left = deadline - nowMs();
+        if (left <= 0 || decoder.quit) return;
+        pollfd p{STDIN_FILENO, POLLIN, 0};
+        int timeout = (int)left + 1;
+        if (timeout > 5) timeout = 5;  // wake often enough to reap compiles
+        int r = poll(&p, 1, timeout);
+        if (r > 0 && (p.revents & POLLIN)) {
+            unsigned char buf[64];
+            ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+            for (ssize_t i = 0; i < n; ++i) decoder.feed(buf[i]);
+        }
+        onWake();
+    }
+}
+
+int scriptKey(int tick) {
+    if (tick >= (int)opt.script.size()) return KNone;
+    switch (opt.script[tick]) {
+        case 'U': case 'u': return KUp;
+        case 'D': case 'd': return KDown;
+        case 'L': case 'l': return KLeft;
+        case 'R': case 'r': return KRight;
+        default: return KNone;
+    }
+}
+
+// ---- drawing ----------------------------------------------------------------
+int stalls = 0;
+double worstStallMs = 0;
+
+void draw(int tick, const std::string& frame) {
+    if (opt.scripted) {
+        std::printf("--- tick %d\n%s", tick, frame.c_str());
+        std::fflush(stdout);
+        return;
+    }
+    std::string s = "\x1b[H";
+    s += frame;
+    char status[160];
+    std::snprintf(status, sizeof status,
+                  " tick %d  stalls %d (worst %.0f ms)  [arrows/WASD, q quits]\x1b[K\n\x1b[J",
+                  tick, stalls, worstStallMs);
+    s += status;
+    // Frames use '\n'; raw mode keeps OPOST so the terminal still returns the carriage.
+    (void)!write(STDOUT_FILENO, s.data(), s.size());
+}
+
+std::string tickDir(int tick, int slot) {
+    return workDir + "/t" + std::to_string(tick) + (slot < 0 ? std::string("") : "s" + std::to_string(slot));
+}
+
+// ---- naive loop: compile the chosen successor after the tick ends -----------
+int runNaive() {
+    std::string cur = tickDir(0, 0);
+    mkdirP(cur);
+    copyFile(opt.root + "/initial_state.hpp", cur + "/state.hpp");
+    compileSync(cur, true);
+
+    for (int tick = 0;; ++tick) {
+        double tickStart = nowMs();
+        draw(tick, readFrame(cur));
+        Info info = readInfo(cur);
+        if (info.terminal) return 0;
+        if (opt.scripted && tick >= (int)opt.script.size()) return 0;
+
+        std::string emitDir = tickDir(tick, -1);
+        mkdirP(emitDir);
+        emitSuccessors(cur, emitDir);
+
+        int key;
+        if (opt.scripted) {
+            if (!opt.noDelay) collectInput(tickStart + opt.tickMs, [] {});
+            key = scriptKey(tick);
+        } else {
+            decoder.last = KNone;
+            collectInput(tickStart + opt.tickMs, [] {});
+            if (decoder.quit) return 0;
+            key = decoder.last;
+        }
+        int slot = info.keys[key];
+
+        std::string next = tickDir(tick + 1, slot);
+        mkdirP(next);
+        copyFile(emitDir + "/succ" + std::to_string(slot) + ".hpp", next + "/state.hpp");
+        double t0 = nowMs();
+        compileSync(next, false);
+        double stall = nowMs() - t0;
+        if (!opt.noDelay) {
+            ++stalls;
+            if (stall > worstStallMs) worstStallMs = stall;
+            logf("stall tick %d: %.1f ms (naive compile)", tick, stall);
+        }
+        removeDir(emitDir);
+        removeDir(cur);
+        cur = next;
+    }
+}
+
+void usage() {
+    std::fputs("usage: driver [--tick MS] [--seed N] [--script KEYS] [--no-delay] [--naive]\n"
+               "              [--root DIR] [--log FILE]\n", stderr);
+    std::exit(2);
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        auto val = [&]() -> std::string { if (i + 1 >= argc) usage(); return argv[++i]; };
+        if (a == "--tick") opt.tickMs = std::atoi(val().c_str());
+        else if (a == "--seed") opt.seed = (unsigned)std::strtoul(val().c_str(), nullptr, 10);
+        else if (a == "--script") { opt.scripted = true; opt.script = val(); }
+        else if (a == "--no-delay") opt.noDelay = true;
+        else if (a == "--naive") opt.naive = true;
+        else if (a == "--root") opt.root = val();
+        else if (a == "--log") opt.log = val();
+        else usage();
+    }
+    if (opt.tickMs <= 0) usage();
+
+    std::string logDir = opt.log.substr(0, opt.log.find_last_of('/'));
+    if (logDir != opt.log) mkdirP(logDir);
+    logFile = std::fopen(opt.log.c_str(), "a");
+    workDir = "tmp/run-" + std::to_string(getpid());
+    mkdirP(workDir);
+    logf("start pid %d tick %d ms seed %u %s", getpid(), opt.tickMs, opt.seed,
+         opt.naive ? "naive" : "speculative");
+
+    for (int s : {SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGSEGV, SIGBUS, SIGABRT}) signal(s, onSignal);
+    std::atexit([] { killAllChildren(); restoreTerminal(); });
+    if (!opt.scripted) enterRawMode();
+
+    int rc = runNaive();
+
+    restoreTerminal();
+    if (!opt.scripted && stalls) std::printf("stalls: %d (worst %.0f ms), see %s\n", stalls, worstStallMs, opt.log.c_str());
+    // Clean up the whole run directory.
+    if (DIR* d = opendir(workDir.c_str())) {
+        while (dirent* e = readdir(d))
+            if (e->d_name[0] != '.') removeDir(workDir + "/" + e->d_name);
+        closedir(d);
+    }
+    rmdir(workDir.c_str());
+    return rc;
+}
