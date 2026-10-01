@@ -384,6 +384,157 @@ int runNaive() {
     }
 }
 
+// ---- speculative loop: compile all 3 successors during the tick -------------
+// One job per slot: a supervisor process (own process group) that compiles
+// DIR/state.hpp into DIR/B and then runs B once with no arguments, so the
+// first-exec cost (macOS scans new executables) is paid during the tick.
+struct Job {
+    pid_t pid = -1;
+    std::string dir;
+    double started = 0, finished = 0;
+    bool done = false;
+    int status = 0;
+};
+
+Job spawnJob(const std::string& dir, bool initial) {
+    Job j;
+    j.dir = dir;
+    j.started = nowMs();
+    auto cmd = compileCommand(dir, initial);
+    std::string bin = dir + "/B";
+    pid_t pid = fork();
+    if (pid < 0) die("fork: %s", std::strerror(errno));
+    if (pid == 0) {
+        setpgid(0, 0);
+        for (int s : {SIGINT, SIGTERM, SIGHUP, SIGQUIT}) signal(s, SIG_DFL);
+        setenv("TMPDIR", dir.c_str(), 1);  // killed compiles leave temp files here
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) dup2(devnull, STDOUT_FILENO);
+        pid_t c = fork();
+        if (c < 0) _exit(126);
+        if (c == 0) {
+            auto v = cargv(cmd);
+            execvp(v[0], v.data());
+            _exit(127);
+        }
+        int st = 0;
+        while (waitpid(c, &st, 0) < 0 && errno == EINTR) {}
+        if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) _exit(1);
+        execl(bin.c_str(), bin.c_str(), (char*)nullptr);  // warm run
+        _exit(127);
+    }
+    setpgid(pid, pid);
+    liveGroups.push_back(pid);
+    j.pid = pid;
+    return j;
+}
+
+void finishJob(Job& j, int st) {
+    j.done = true;
+    j.finished = nowMs();
+    j.status = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+    forgetGroup(j.pid);
+}
+
+void reapJobs(Job* jobs, int n) {
+    for (int i = 0; i < n; ++i) {
+        if (jobs[i].done || jobs[i].pid < 0) continue;
+        int st;
+        if (waitpid(jobs[i].pid, &st, WNOHANG) == jobs[i].pid) finishJob(jobs[i], st);
+    }
+}
+
+void waitJob(Job& j) {
+    if (j.done) return;
+    int st = 0;
+    while (waitpid(j.pid, &st, 0) < 0 && errno == EINTR) {}
+    finishJob(j, st);
+}
+
+void cancelJob(Job& j) {
+    if (j.done || j.pid < 0) return;
+    kill(-j.pid, SIGKILL);
+    waitJob(j);
+}
+
+int runSpeculative() {
+    std::string cur = tickDir(0, 0);
+    mkdirP(cur);
+    copyFile(opt.root + "/initial_state.hpp", cur + "/state.hpp");
+    {
+        Job first = spawnJob(cur, true);
+        waitJob(first);
+        if (first.status != 0) die("initial compile failed (status %d)", first.status);
+        logf("initial compile+warm: %.1f ms", first.finished - first.started);
+    }
+
+    for (int tick = 0;; ++tick) {
+        double tickStart = nowMs();
+        // 1-2. draw, read key table and terminal flag
+        draw(tick, readFrame(cur));
+        Info info = readInfo(cur);
+        if (info.terminal) return 0;
+        if (opt.scripted && tick >= (int)opt.script.size()) return 0;
+
+        // 3. successor headers
+        std::string emitDir = tickDir(tick, -1);
+        mkdirP(emitDir);
+        emitSuccessors(cur, emitDir);
+
+        // 4. compile all three in parallel
+        Job jobs[3];
+        for (int s = 0; s < 3; ++s) {
+            std::string d = tickDir(tick + 1, s);
+            mkdirP(d);
+            copyFile(emitDir + "/succ" + std::to_string(s) + ".hpp", d + "/state.hpp");
+            jobs[s] = spawnJob(d, false);
+        }
+        double spawned = nowMs();
+
+        // 5. collect input until the tick ends
+        int key;
+        if (opt.scripted) {
+            if (!opt.noDelay) collectInput(tickStart + opt.tickMs, [&] { reapJobs(jobs, 3); });
+            key = scriptKey(tick);
+        } else {
+            decoder.last = KNone;
+            collectInput(tickStart + opt.tickMs, [&] { reapJobs(jobs, 3); });
+            if (decoder.quit) {
+                for (auto& j : jobs) cancelJob(j);
+                return 0;
+            }
+            key = decoder.last;
+        }
+
+        // 6. table lookup
+        int slot = info.keys[key];
+
+        // 7. wait for the chosen compile, drop the others
+        Job& chosen = jobs[slot];
+        double waitStart = nowMs();
+        bool wasReady = chosen.done;
+        waitJob(chosen);
+        double stall = nowMs() - waitStart;
+        for (int s = 0; s < 3; ++s)
+            if (s != slot) cancelJob(jobs[s]);
+        if (chosen.status != 0) die("compile failed in %s (status %d)", chosen.dir.c_str(), chosen.status);
+        logf("tick %d: pre %.1f ms, compile+warm %.1f ms, slot %d%s", tick, spawned - tickStart,
+             chosen.finished - chosen.started, slot, wasReady ? "" : " (waited)");
+        if (!wasReady && !opt.noDelay) {
+            ++stalls;
+            if (stall > worstStallMs) worstStallMs = stall;
+            logf("STALL tick %d: waited %.1f ms for slot %d", tick, stall, slot);
+        }
+
+        // 8. advance; remove everything from the previous tick
+        removeDir(emitDir);
+        removeDir(cur);
+        for (int s = 0; s < 3; ++s)
+            if (s != slot) removeDir(jobs[s].dir);
+        cur = chosen.dir;
+    }
+}
+
 void usage() {
     std::fputs("usage: driver [--tick MS] [--seed N] [--script KEYS] [--no-delay] [--naive]\n"
                "              [--root DIR] [--log FILE]\n", stderr);
@@ -419,7 +570,7 @@ int main(int argc, char** argv) {
     std::atexit([] { killAllChildren(); restoreTerminal(); });
     if (!opt.scripted) enterRawMode();
 
-    int rc = runNaive();
+    int rc = opt.naive ? runNaive() : runSpeculative();
 
     restoreTerminal();
     if (!opt.scripted && stalls) std::printf("stalls: %d (worst %.0f ms), see %s\n", stalls, worstStallMs, opt.log.c_str());
