@@ -95,7 +95,8 @@ struct KeyTable<Game<D, F, S, Sc, Body>> {
 // Snake of length 3 heading right in the middle-left of the board; food from Seed<N>.
 template<unsigned N> struct InitialT {
     using Body = Snake<P<W / 4 + 2, H / 2>, P<W / 4 + 1, H / 2>, P<W / 4, H / 2>>;
-    using Sp = SpawnFood<Body, Seed<N>>;
+    // Advance once first: small seeds have all-zero high bits.
+    using Sp = SpawnFood<Body, NextSeed<Seed<N>>>;
     using type = Game<Dir::Right, Food<Sp::Pos::x, Sp::Pos::y>, typename Sp::Seed, Score<0>, Body>;
 };
 template<unsigned N> using Initial = typename InitialT<N>::type;
