@@ -2,6 +2,7 @@
 #include "../engine/core.hpp"
 #include "../engine/step.hpp"
 #include "../engine/rng.hpp"
+#include "../engine/game.hpp"
 
 namespace core_tests {
 using namespace ts;
@@ -185,5 +186,90 @@ static_assert(!Sp4::Full && Same<Sp4::Pos, P<W-1, H-1>>);
 using Sp5 = SpawnFood<Cover<W * H>, Seed<3>>;
 static_assert(Sp5::Full);
 } // namespace rng_tests
+
+namespace game_tests {
+using namespace ts;
+
+using Body = Snake<P<5,5>, P<4,5>, P<3,5>>;
+template<Dir D, int Fx, int Fy, int Sc = 0, class B = Body>
+using G = Game<D, Food<Fx, Fy>, Seed<77>, Score<Sc>, B>;
+
+// Plain move keeps food/seed/score
+static_assert(Same<Next<G<Dir::Right, 0, 0>, Dir::Right>,
+                   Game<Dir::Right, Food<0,0>, Seed<77>, Score<0>, Snake<P<6,5>, P<5,5>, P<4,5>>>>);
+
+// Eating: score +1, body grows, food moves off the snake, seed advances
+using Ate = Next<G<Dir::Right, 6, 5, 4>, Dir::Right>;
+template<class T> struct Parts;
+template<Dir D, int Fx, int Fy, class S, int Sc, class B>
+struct Parts<Game<D, Food<Fx, Fy>, S, Score<Sc>, B>> {
+    static constexpr Dir dir = D;
+    using FoodP = P<Fx, Fy>;
+    using Seed_ = S;
+    static constexpr int score = Sc;
+    using Body_ = B;
+};
+static_assert(Parts<Ate>::score == 5);
+static_assert(Same<Parts<Ate>::Body_, Snake<P<6,5>, P<5,5>, P<4,5>, P<3,5>>>);
+static_assert(!Contains<Parts<Ate>::FoodP, Parts<Ate>::Body_>);
+static_assert(InBounds<Parts<Ate>::FoodP>);
+static_assert(!Same<Parts<Ate>::Seed_, Seed<77>>);
+
+// Death keeps the score
+static_assert(Same<Next<G<Dir::Right, 0, 0, 3, Snake<P<W-1,2>, P<W-2,2>>>, Dir::Right>, GameOver<3>>);
+static_assert(IsTerminal<GameOver<3>> && IsTerminal<GameOver<9, true>>);
+static_assert(!IsTerminal<G<Dir::Up, 0, 0>>);
+
+// Successors: straight, left, right relative to heading
+using Su = Successors<G<Dir::Right, 0, 0>>;
+static_assert(Same<Slot<0, Su>, Next<G<Dir::Right, 0, 0>, Dir::Right>>);
+static_assert(Same<Slot<1, Su>, Next<G<Dir::Right, 0, 0>, Dir::Up>>);
+static_assert(Same<Slot<2, Su>, Next<G<Dir::Right, 0, 0>, Dir::Down>>);
+static_assert(Parts<Slot<1, Su>>::dir == Dir::Up);
+static_assert(Same<Parts<Slot<2, Su>>::Body_, Snake<P<5,6>, P<5,5>, P<4,5>>>);
+// A successor can be terminal: heading up at the top wall, straight dies
+using Top = Successors<G<Dir::Up, 9, 9, 2, Snake<P<4,0>, P<4,1>>>>;
+static_assert(Same<Slot<0, Top>, GameOver<2>>);
+static_assert(!IsTerminal<Slot<1, Top>> && !IsTerminal<Slot<2, Top>>);
+
+// Key table: order is None, Up, Down, Left, Right
+template<Dir D> constexpr const int* K = KeyTable<G<D, 0, 0>>::slots;
+// heading Right: Up = left turn, Down = right turn, Left (reverse) = straight
+static_assert(K<Dir::Right>[0] == 0 && K<Dir::Right>[1] == 1 && K<Dir::Right>[2] == 2
+           && K<Dir::Right>[3] == 0 && K<Dir::Right>[4] == 0);
+// heading Left: Up = right, Down = left, Right (reverse) = straight
+static_assert(K<Dir::Left>[0] == 0 && K<Dir::Left>[1] == 2 && K<Dir::Left>[2] == 1
+           && K<Dir::Left>[3] == 0 && K<Dir::Left>[4] == 0);
+// heading Up: Left = left, Right = right, Down (reverse) = straight
+static_assert(K<Dir::Up>[0] == 0 && K<Dir::Up>[1] == 0 && K<Dir::Up>[2] == 0
+           && K<Dir::Up>[3] == 1 && K<Dir::Up>[4] == 2);
+// heading Down: Left = right, Right = left, Up (reverse) = straight
+static_assert(K<Dir::Down>[0] == 0 && K<Dir::Down>[1] == 0 && K<Dir::Down>[2] == 0
+           && K<Dir::Down>[3] == 2 && K<Dir::Down>[4] == 1);
+// Every key's chosen slot heads where the key says (unless it is the reverse)
+using VBody = Snake<P<5,5>, P<5,4>, P<5,3>>;
+using GD = G<Dir::Down, 0, 0, 0, VBody>;
+static_assert(Parts<Slot<KeyTable<GD>::slots[3], Successors<GD>>>::dir == Dir::Left);
+static_assert(Parts<Slot<KeyTable<GD>::slots[4], Successors<GD>>>::dir == Dir::Right);
+static_assert(Parts<Slot<KeyTable<GD>::slots[1], Successors<GD>>>::dir == Dir::Down);
+// Terminal key table is all zeros
+static_assert(KeyTable<GameOver<1>>::slots[1] == 0 && KeyTable<GameOver<1>>::slots[4] == 0);
+
+// Board-full win: every cell but (W-1, H-1) is snake, head at (W-2, H-1)
+// heading right, food on the last free cell. Eating fills the board.
+template<int I> using C = P<I % W, I / W>;
+template<class Seq> struct RevCover;
+template<int... I> struct RevCover<ISeq<int, I...>> { using type = Snake<C<W * H - 2 - I>...>; };
+using AlmostFull = RevCover<MakeSeq<W * H - 1>>::type;
+static_assert(Same<Head<AlmostFull>, P<W-2, H-1>> && Length<AlmostFull> == W * H - 1);
+using Win = Next<Game<Dir::Right, Food<W-1, H-1>, Seed<5>, Score<40>, AlmostFull>, Dir::Right>;
+static_assert(Same<Win, GameOver<41, true>>);
+
+// Initial state: valid, length 3, food off the snake
+using I0 = Initial<1>;
+static_assert(Length<Parts<I0>::Body_> == 3 && Parts<I0>::score == 0);
+static_assert(!Contains<Parts<I0>::FoodP, Parts<I0>::Body_> && InBounds<Parts<I0>::FoodP>);
+static_assert(!Same<Initial<1>, Initial<2>>);
+} // namespace game_tests
 
 int main() {}
