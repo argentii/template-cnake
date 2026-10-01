@@ -1,6 +1,7 @@
 // Compile-time tests. If this file compiles (-fsyntax-only), every test passed.
 #include "../engine/core.hpp"
 #include "../engine/step.hpp"
+#include "../engine/rng.hpp"
 
 namespace core_tests {
 using namespace ts;
@@ -121,5 +122,68 @@ static_assert(Step<Ring, Dir::Down, P<1,2>>::Dead);
 static_assert(!Step<Snake<P<4,4>>, Dir::Left, NoFood>::Dead);
 static_assert(Same<Step<Snake<P<4,4>>, Dir::Left, NoFood>::Body, Snake<P<3,4>>>);
 } // namespace step_tests
+
+namespace rng_tests {
+using namespace ts;
+
+// Cell index -> point, row-major
+template<int I> using CellAt = P<I % W, I / W>;
+// A body covering cells [0, N) except index Skip (Skip = -1: skip nothing).
+template<int Skip, class Seq> struct CoverImpl;
+template<int Skip, int... I>
+struct CoverImpl<Skip, ISeq<int, I...>> {
+    using type = Snake<CellAt<(Skip >= 0 && I >= Skip) ? I + 1 : I>...>;
+};
+template<int N, int Skip = -1> using Cover = typename CoverImpl<Skip, MakeSeq<N>>::type;
+
+// LCG
+static_assert(Same<NextSeed<Seed<0>>, Seed<1013904223u>>);
+static_assert(Same<NextSeed<Seed<1>>, Seed<1664525u + 1013904223u>>);
+static_assert(!Same<NextSeed<Seed<42>>, Seed<42>>);
+
+// Seed cells are always on the board
+static_assert(InBounds<SeedCell<Seed<0>>>);
+static_assert(InBounds<SeedCell<Seed<0xFFFFFFFFu>>>);
+static_assert(InBounds<SeedCell<NextSeed<NextSeed<Seed<7>>>>>);
+
+// On an empty-ish board the first try wins and the seed advances once
+using Small = Snake<P<0,0>>;
+using Sp1 = SpawnFood<Snake<P<-5,-5>>, Seed<7>>;
+static_assert(!Sp1::Full);
+static_assert(Same<Sp1::Pos, SeedCell<Seed<7>>>);
+static_assert(Same<Sp1::Seed, NextSeed<Seed<7>>>);
+
+// Food never spawns on the snake: put the snake exactly where the seed points
+using Blocker = Snake<SeedCell<Seed<7>>>;
+using Sp2 = SpawnFood<Blocker, Seed<7>>;
+static_assert(!Sp2::Full && !Contains<Sp2::Pos, Blocker>);
+static_assert(InBounds<Sp2::Pos>);
+
+// Deterministic scan: row 0 full plus 3 cells of row 1 -> first free is (3,1)
+using Partial = Cover<W + 3>;
+static_assert(Length<Partial> == W + 3);
+using Sc1 = ScanFree<Partial, Seed<9>>::type;
+static_assert(!Sc1::Full && Same<Sc1::Pos, P<3,1>>);
+static_assert(Same<Sc1::Seed, Seed<9>>);
+static_assert(Same<ScanFree<Small, Seed<1>>::type::Pos, P<1,0>>);
+static_assert(Same<ScanFree<Snake<P<5,5>>, Seed<1>>::type::Pos, P<0,0>>);
+
+// Out of retries -> falls back to the scan
+static_assert(Same<TrySpawn<Partial, Seed<9>, 0>::type, Sc1>);
+
+// Board with exactly one free cell: spawn must find it (random tries ~always miss)
+constexpr int Hole = W * H / 2 + 3;
+using OneFree = Cover<W * H - 1, Hole>;
+static_assert(!Contains<CellAt<Hole>, OneFree>);
+using Sp3 = SpawnFood<OneFree, Seed<12345>>;
+static_assert(!Sp3::Full && Same<Sp3::Pos, CellAt<Hole>>);
+// Last cell of the board
+using Sp4 = SpawnFood<Cover<W * H - 1>, Seed<3>>;
+static_assert(!Sp4::Full && Same<Sp4::Pos, P<W-1, H-1>>);
+
+// Full board: Full is reported, no infinite recursion
+using Sp5 = SpawnFood<Cover<W * H>, Seed<3>>;
+static_assert(Sp5::Full);
+} // namespace rng_tests
 
 int main() {}
