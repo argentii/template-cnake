@@ -1,5 +1,5 @@
 #!/bin/sh
-# Golden replay tests. Each tests/golden/NAME.case holds "SEED SCRIPT".
+# Golden replay tests. Each tests/golden/NAME.case holds "SEED SCRIPT [EXTRA DRIVER ARGS...]".
 # Usage: run.sh DRIVER [--update] [extra driver args...]
 set -u
 driver=$1; shift
@@ -9,9 +9,10 @@ dir=$(dirname "$0")
 fail=0
 for c in "$dir"/*.case; do
     name=$(basename "$c" .case)
-    read -r seed script < "$c"
+    read -r seed script extra < "$c"
     out="$dir/$name.out"
-    actual=$("$driver" --script "$script" --no-delay --seed "$seed" "$@") || { echo "FAIL $name (driver exited $?)"; fail=1; continue; }
+    # shellcheck disable=SC2086  # extra is a word list on purpose
+    actual=$("$driver" --script "$script" --no-delay --seed "$seed" ${extra:-} "$@") || { echo "FAIL $name (driver exited $?)"; fail=1; continue; }
     if [ $update = 1 ]; then printf '%s\n' "$actual" > "$out"; echo "updated $name"; continue; fi
     if printf '%s\n' "$actual" | diff -u "$out" - > /dev/null; then
         echo "ok   $name"

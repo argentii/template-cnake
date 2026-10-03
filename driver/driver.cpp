@@ -4,9 +4,10 @@
 // out of the frame binary B(S), which the template engine computed.
 //
 // usage: driver [--tick MS] [--calibrate] [--seed N] [--script KEYS] [--no-delay] [--naive]
-//               [--root DIR] [--log FILE]
+//               [--grid WxH] [--root DIR] [--log FILE]
 //   --tick    tick length; without it the driver measures this machine at startup
 //   --calibrate  measure, print the tick it would pick, and exit
+//   --grid WxH   board size passed to the compiler (3x2 to 63x63; default 16x12)
 //   --script  one input per tick: U D L R, or '.' for none; implies no terminal UI
 //   --no-delay  do not wait for the tick clock (replay as fast as compiles allow)
 #include <cerrno>
@@ -39,6 +40,7 @@ struct Options {
     bool noDelay = false;
     bool naive = false;
     std::string root = ".";
+    int gridW = 0, gridH = 0;  // 0 = engine default
     std::string log = "tmp/driver.log";
 };
 Options opt;
@@ -207,6 +209,10 @@ std::string workDir;
 std::vector<std::string> compileCommand(const std::string& dir, bool initial) {
     std::vector<std::string> a = {"clang++", "-std=c++20", "-O0", "-I" + dir};
     if (initial) a.push_back("-DTS_SEED=" + std::to_string(opt.seed));
+    if (opt.gridW) {
+        a.push_back("-DTS_GRID_W=" + std::to_string(opt.gridW));
+        a.push_back("-DTS_GRID_H=" + std::to_string(opt.gridH));
+    }
     a.push_back(opt.root + "/frame.cpp");
     a.push_back("-o");
     a.push_back(dir + "/B");
@@ -630,7 +636,7 @@ void sweepStaleRuns() {
 
 void usage() {
     std::fputs("usage: driver [--tick MS] [--calibrate] [--seed N] [--script KEYS] [--no-delay] [--naive]\n"
-               "              [--root DIR] [--log FILE]\n", stderr);
+               "              [--grid WxH] [--root DIR] [--log FILE]\n", stderr);
     std::exit(2);
 }
 
@@ -647,6 +653,10 @@ int main(int argc, char** argv) {
         else if (a == "--no-delay") opt.noDelay = true;
         else if (a == "--naive") opt.naive = true;
         else if (a == "--root") opt.root = val();
+        else if (a == "--grid") {
+            if (std::sscanf(val().c_str(), "%dx%d", &opt.gridW, &opt.gridH) != 2) usage();
+            if (opt.gridW < 3 || opt.gridH < 2 || opt.gridW > 63 || opt.gridH > 63) usage();
+        }
         else if (a == "--log") opt.log = val();
         else usage();
     }
