@@ -61,3 +61,14 @@ binaries are killed. Stalls that do happen are logged to `tmp/driver.log`.
 Precompiled header for the engine + `<cstdio>`: saves 3–5 ms per compile. Not
 adopted: the ~110 ms per-binary scan is 20x larger, and a PCH adds a build step
 that must match flags exactly.
+
+## Automatic tick length
+
+Without `--tick`, the driver measures at startup (2 rounds of 3 parallel
+compiles + first runs of the initial state; tick = slowest round × 1.1 + 25 ms,
+rounded up to 10 ms, clamped to 200–1000 ms). This replaces the fixed macOS
+default of 450 ms.
+
+On the M4: rounds take 391–430 ms; the picked tick was 470–500 ms. Two timed
+59-tick replays at the picked tick (480 and 490 ms) had 0 stalls. A 1.25×
+margin rounded to 50 ms gave 550–600 ms, slower than needed.

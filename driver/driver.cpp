@@ -3,8 +3,10 @@
 // the key->slot table, the terminal flag and the successor headers all come
 // out of the frame binary B(S), which the template engine computed.
 //
-// usage: driver [--tick MS (default 200, macOS 450)] [--seed N] [--script KEYS] [--no-delay] [--naive]
+// usage: driver [--tick MS] [--calibrate] [--seed N] [--script KEYS] [--no-delay] [--naive]
 //               [--root DIR] [--log FILE]
+//   --tick    tick length; without it the driver measures this machine at startup
+//   --calibrate  measure, print the tick it would pick, and exit
 //   --script  one input per tick: U D L R, or '.' for none; implies no terminal UI
 //   --no-delay  do not wait for the tick clock (replay as fast as compiles allow)
 #include <cerrno>
@@ -29,13 +31,8 @@ namespace {
 
 // ---- options ----------------------------------------------------------------
 struct Options {
-#ifdef __APPLE__
-    // macOS scans each new binary on first run, one at a time (~107 ms each);
-    // three per tick need ~400 ms. See PERF.md.
-    int tickMs = 450;
-#else
-    int tickMs = 200;
-#endif
+    int tickMs = 0;  // 0 = measure at startup (see calibrate)
+    bool calibrateOnly = false;
     unsigned seed = 1;
     bool scripted = false;
     std::string script;
@@ -332,8 +329,8 @@ void draw(int tick, const std::string& frame) {
     s += frame;
     char status[160];
     std::snprintf(status, sizeof status,
-                  " tick %d  stalls %d (worst %.0f ms)  [arrows/WASD, q quits]\x1b[K\n\x1b[J",
-                  tick, stalls, worstStallMs);
+                  " tick %d (%d ms)  stalls %d (worst %.0f ms)  [arrows/WASD, q quits]\x1b[K\n\x1b[J",
+                  tick, opt.tickMs, stalls, worstStallMs);
     s += status;
     // Frames use '\n'; raw mode keeps OPOST so the terminal still returns the carriage.
     (void)!write(STDOUT_FILENO, s.data(), s.size());
@@ -468,11 +465,68 @@ void cancelJob(Job& j) {
     waitJob(j);
 }
 
+// ---- tick calibration ---------------------------------------------------------
+// The tick has to cover one tick's work: a few ms of B frame/info/emit, then
+// three compiles in parallel, each followed by its first run. On macOS that
+// first run is slow and serialized (new executables are scanned), so the cost
+// differs a lot between machines and settings. Measure it instead of guessing.
+constexpr int MinTickMs = 200;   // classic Snake speed; never go faster
+constexpr int MaxTickMs = 1000;  // beyond this the game is unplayable anyway
+constexpr int CalibrationRounds = 2;
+constexpr double TickMargin = 1.1;
+constexpr double PreWorkMs = 25;  // B frame + info + emit before compiles start
+
+// Time one round: three jobs on the initial state, until the last is warm.
+// The job in keepDir (if any) is left built for the game to start from.
+double calibrationRound(int round, const std::string& keepDir) {
+    std::string dirs[3];
+    Job jobs[3];
+    double t0 = nowMs();
+    for (int i = 0; i < 3; ++i) {
+        dirs[i] = (i == 0 && !keepDir.empty()) ? keepDir
+                  : workDir + "/cal" + std::to_string(round) + "_" + std::to_string(i);
+        mkdirP(dirs[i]);
+        copyFile(opt.root + "/initial_state.hpp", dirs[i] + "/state.hpp");
+        jobs[i] = spawnJob(dirs[i], true);
+    }
+    for (auto& j : jobs) {
+        waitJob(j);
+        if (j.status != 0) die("compile failed in %s (status %d)", j.dir.c_str(), j.status);
+    }
+    double t = nowMs() - t0;
+    for (int i = 0; i < 3; ++i)
+        if (dirs[i] != keepDir) removeDir(dirs[i]);
+    logf("calibration round %d: 3 compiles + first runs in %.1f ms", round, t);
+    return t;
+}
+
+// Returns the tick length to use; leaves keepDir/B built from the initial state.
+int calibrate(const std::string& keepDir, double* measured) {
+    double worst = 0;
+    for (int r = 0; r < CalibrationRounds; ++r) {
+        double t = calibrationRound(r, r == 0 ? keepDir : "");
+        if (t > worst) worst = t;
+    }
+    int tick = (int)(worst * TickMargin + PreWorkMs);
+    tick = (tick + 9) / 10 * 10;  // round up to 10 ms
+    if (tick < MinTickMs) tick = MinTickMs;
+    if (tick > MaxTickMs) tick = MaxTickMs;
+    if (measured) *measured = worst;
+    logf("calibrated tick: %d ms (slowest round %.1f ms)", tick, worst);
+    return tick;
+}
+
 int runSpeculative() {
     std::string cur = tickDir(0, 0);
     mkdirP(cur);
     copyFile(opt.root + "/initial_state.hpp", cur + "/state.hpp");
-    {
+    if (opt.tickMs == 0) {
+        if (!opt.scripted) {
+            static const char msg[] = "\x1b[Hmeasuring compile speed...\x1b[K";
+            (void)!write(STDOUT_FILENO, msg, sizeof msg - 1);
+        }
+        opt.tickMs = calibrate(cur, nullptr);
+    } else {
         Job first = spawnJob(cur, true);
         waitJob(first);
         if (first.status != 0) die("initial compile failed (status %d)", first.status);
@@ -575,7 +629,7 @@ void sweepStaleRuns() {
 }
 
 void usage() {
-    std::fputs("usage: driver [--tick MS] [--seed N] [--script KEYS] [--no-delay] [--naive]\n"
+    std::fputs("usage: driver [--tick MS] [--calibrate] [--seed N] [--script KEYS] [--no-delay] [--naive]\n"
                "              [--root DIR] [--log FILE]\n", stderr);
     std::exit(2);
 }
@@ -587,6 +641,7 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         auto val = [&]() -> std::string { if (i + 1 >= argc) usage(); return argv[++i]; };
         if (a == "--tick") opt.tickMs = std::atoi(val().c_str());
+        else if (a == "--calibrate") opt.calibrateOnly = true;
         else if (a == "--seed") opt.seed = (unsigned)std::strtoul(val().c_str(), nullptr, 10);
         else if (a == "--script") { opt.scripted = true; opt.script = val(); }
         else if (a == "--no-delay") opt.noDelay = true;
@@ -595,7 +650,9 @@ int main(int argc, char** argv) {
         else if (a == "--log") opt.log = val();
         else usage();
     }
-    if (opt.tickMs <= 0) usage();
+    if (opt.tickMs < 0) usage();
+    // Timing doesn't matter for these; skip measuring.
+    if (opt.tickMs == 0 && (opt.naive || opt.noDelay)) opt.tickMs = MinTickMs;
 
     std::string logDir = opt.log.substr(0, opt.log.find_last_of('/'));
     if (logDir != opt.log) mkdirP(logDir);
@@ -603,8 +660,22 @@ int main(int argc, char** argv) {
     sweepStaleRuns();
     workDir = "tmp/run-" + std::to_string(getpid());
     mkdirP(workDir);
-    logf("start pid %d tick %d ms seed %u %s", getpid(), opt.tickMs, opt.seed,
+    logf("start pid %d tick %s seed %u %s", getpid(),
+         opt.tickMs ? (std::to_string(opt.tickMs) + " ms").c_str() : "auto", opt.seed,
          opt.naive ? "naive" : "speculative");
+
+    if (opt.calibrateOnly) {
+        std::string keep = tickDir(0, 0);
+        mkdirP(keep);
+        double measured = 0;
+        int tick = calibrate(keep, &measured);
+        removeDir(keep);
+        rmdir(workDir.c_str());
+        std::printf("one tick of work (3 parallel compiles + first runs): %.0f ms\n"
+                    "tick: %d ms%s\n", measured, tick,
+                    tick == MaxTickMs ? " (capped; expect stalls)" : "");
+        return 0;
+    }
 
     for (int s : {SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGSEGV, SIGBUS, SIGABRT}) signal(s, onSignal);
     std::atexit([] { killAllChildren(); restoreTerminal(); });

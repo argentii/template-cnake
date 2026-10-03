@@ -45,7 +45,8 @@ heading in is ignored.
 
 | Option | Meaning |
 |---|---|
-| `--tick MS` | Tick length. Default 200 ms on Linux, 450 ms on macOS (see below). |
+| `--tick MS` | Tick length. Without it, the driver measures this machine at startup (see below). |
+| `--calibrate` | Measure, print the tick length the driver would pick, and exit. |
 | `--seed N` | Food sequence seed (default 1). |
 | `--naive` | Compile the next state only after the tick ends. Slow and stuttery; for debugging. |
 | `--script KEYS` | Non-interactive replay: one input per tick, `U` `D` `L` `R` or `.` for none. Prints every frame. |
@@ -164,12 +165,21 @@ make test
 A tick's compile and link takes about 43 ms at snake length 3 and 64 ms at
 length 100 on an Apple M4.
 
+**Automatic tick length.** Unless you pass `--tick`, the driver times one
+tick's worth of work at startup: three compiles of the initial state in
+parallel, each followed by its first run. It does this twice, takes the slower
+round, adds 10% plus 25 ms for the per-tick bookkeeping, and rounds up to 10 ms.
+The result is clamped to 200–1000 ms: 200 ms is classic Snake speed, and above
+1000 ms the game isn't fun anyway. It adds about a second to startup, and one of
+the compiles becomes the first frame. Run `build/driver --calibrate` to see
+what it picks.
+
 **macOS:** macOS scans every newly built executable on its first run, one at a
 time (about 107 ms each, more under load). Three new binaries per tick costs
-about 330 ms, so the macOS default tick is 450 ms. The driver runs each fresh
-binary once during the tick to hide that cost. To remove the scan, add your
-terminal app under System Settings → Privacy & Security → Developer Tools; then
-try `--tick 200`.
+about 400 ms, so the measured tick on an M4 comes out around 480–500 ms. The
+driver runs each fresh binary once during the tick to hide that cost. If you
+add your terminal app under System Settings → Privacy & Security → Developer
+Tools, the scan goes away and the measured tick should drop toward 200 ms.
 
 Stalls (ticks where the chosen compile wasn't ready) are logged to
 `tmp/driver.log`. Full numbers are in `PERF.md`.
@@ -181,6 +191,7 @@ Stalls (ticks where the chosen compile wasn't ready) are logged to
 - **Compile errors about `frame.cpp` not found**: run from the repository root
   or pass `--root`.
 - **The snake pauses now and then**: check `tmp/driver.log` for `STALL` lines
-  and try a longer `--tick`.
+  and try a longer `--tick`. The measured tick reflects the machine at
+  startup; heavy load later in the game can still cause stalls.
 - **Leftover `tmp/run-*` directories** after a crash or Ctrl-C are removed the
   next time the driver starts.
