@@ -169,6 +169,10 @@ overridden with `-DTS_GRID_W` / `-DTS_GRID_H`.
 make test
 ```
 
+CI (`.github/workflows/ci.yml`) runs the same suite on Ubuntu and macOS on
+every push, runs the golden replays against the naive driver too, and prints
+each runner's measured tick floor.
+
 - **Static tests** (`tests/static_tests.cpp`): `static_assert`s for every
   metafunction. If the file compiles, they pass.
 - **Serialize round trip**: states are written out as headers, compiled back

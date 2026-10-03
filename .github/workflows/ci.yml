@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Toolchain
+        run: clang++ --version
+
+      - name: Build driver
+        run: make all
+
+      - name: Static tests, serialize round trip, golden replays
+        run: make test
+
+      - name: Golden replays (naive driver)
+        run: make golden DRIVER_ARGS=--naive
+
+      - name: Measured tick floor on this runner
+        run: build/driver --calibrate
+
+      - name: Driver log
+        if: always()
+        run: cat tmp/driver.log || true
