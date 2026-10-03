@@ -4,6 +4,7 @@
 #pragma once
 #include "core.hpp"
 #include "text.hpp"
+#include "game.hpp"
 
 namespace ts {
 
@@ -34,23 +35,29 @@ constexpr Str<BoardLen> PaintBoard(const int (&xs)[N], const int (&ys)[N], int f
     return b;
 }
 
-template<class State> struct Render;
+// Render<State, Best<B>>: B is the best score from earlier games.
+template<class State, class B = Best<0>> struct Render;
 
-template<Dir D, int Fx, int Fy, class S, int Sc, class... Ps>
-struct Render<Game<D, Food<Fx, Fy>, S, Score<Sc>, Snake<Ps...>>> {
+template<Dir D, int Fx, int Fy, class S, int Sc, class... Ps, int B>
+struct Render<Game<D, Food<Fx, Fy>, S, Score<Sc>, Snake<Ps...>>, Best<B>> {
     static constexpr int xs[] = {Ps::x...};
     static constexpr int ys[] = {Ps::y...};
     static constexpr auto frame =
-        Concat(PaintBoard(xs, ys, Fx, Fy), Lit(" Score: "), IntStr<Sc>(), Lit("\n"));
+        Concat(PaintBoard(xs, ys, Fx, Fy), Lit(" Score: "), IntStr<Sc>(),
+               Lit("  Best: "), IntStr<B>(), Lit("\n"));
 };
 
 template<bool Won> inline constexpr auto OverBanner = Lit("\n  *** GAME OVER ***\n");
 template<>          inline constexpr auto OverBanner<true> = Lit("\n  *** YOU WIN! ***\n");
 
-template<int Sc, bool Won>
-struct Render<GameOver<Sc, Won>> {
+template<bool IsNew, int B> inline constexpr auto BestLine = Concat(Lit("  Best: "), IntStr<B>(), Lit("\n"));
+template<int B>             inline constexpr auto BestLine<true, B> = Lit("  New best!\n");
+
+template<int Sc, bool Won, int B>
+struct Render<GameOver<Sc, Won>, Best<B>> {
     static constexpr auto frame =
-        Concat(OverBanner<Won>, Lit("  Final score: "), IntStr<Sc>(), Lit("\n\n"));
+        Concat(OverBanner<Won>, Lit("  Final score: "), IntStr<Sc>(), Lit("\n"),
+               BestLine<IsNewBest<GameOver<Sc, Won>, Best<B>>, B>, Lit("\n"));
 };
 
 } // namespace ts

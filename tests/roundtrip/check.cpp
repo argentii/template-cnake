@@ -29,4 +29,8 @@ namespace c6 {
 #include "case6.hpp"
 }
 static_assert(ts::Same<c6::State, rt::Case<6>::type>, "round trip 6");
+namespace best {
+#include "best.hpp"
+}
+static_assert(ts::Same<best::BestScore, ts::Best<17>>, "best header round trip");
 int main() {}

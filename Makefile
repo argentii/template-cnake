@@ -41,4 +41,4 @@ golden-update: $(BUILD)/driver
 	tests/golden/run.sh $(BUILD)/driver --update $(DRIVER_ARGS)
 
 clean:
-	rm -rf $(BUILD) tmp
+	rm -rf $(BUILD) tmp/run-*  # keeps tmp/best (saved high score)

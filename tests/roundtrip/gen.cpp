@@ -18,4 +18,12 @@ template<int... I> static void writeAll(const char* dir, ts::ISeq<int, I...>) { 
 int main(int argc, char** argv) {
     if (argc != 2) return 2;
     writeAll(argv[1], ts::MakeSeq<rt::NumCases>{});
+    // The best-score header written by B best.
+    char path[512];
+    std::snprintf(path, sizeof path, "%s/best.hpp", argv[1]);
+    FILE* f = std::fopen(path, "wb");
+    if (!f) { std::perror(path); return 1; }
+    constexpr auto& t = ts::BestHeader<ts::Best<17>>::text;
+    std::fwrite(t.c, 1, t.size, f);
+    std::fclose(f);
 }

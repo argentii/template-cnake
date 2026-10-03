@@ -5,7 +5,8 @@
 //
 // usage: driver [--tick MS] [--calibrate] [--seed N] [--script KEYS] [--no-delay] [--naive]
 //               [--grid WxH] [--root DIR] [--log FILE]
-//   --tick    tick length; without it the driver measures this machine at startup
+//   --tick    slowest tick compiles need (floor); without it, measured at startup.
+//             The game sets its own speed (B info "tick") and is slowed to the floor if needed.
 //   --calibrate  measure, print the tick it would pick, and exit
 //   --grid WxH   board size passed to the compiler (3x2 to 63x63; default 16x12)
 //   --script  one input per tick: U D L R, or '.' for none; implies no terminal UI
@@ -32,7 +33,9 @@ namespace {
 
 // ---- options ----------------------------------------------------------------
 struct Options {
-    int tickMs = 0;  // 0 = measure at startup (see calibrate)
+    // Slowest the hardware allows: the game's own tick (from B info) is used
+    // unless compiles can't keep up with it. -1 = measure at startup.
+    int floorMs = -1;
     bool calibrateOnly = false;
     unsigned seed = 1;
     bool scripted = false;
@@ -204,10 +207,13 @@ void copyFile(const std::string& from, const std::string& to) {
 
 // ---- the compiler -----------------------------------------------------------
 std::string workDir;
+const std::string bestDir = "tmp/best";  // holds best.hpp, written by B best
 
 // clang++ invocation that turns DIR/state.hpp into DIR/B.
 std::vector<std::string> compileCommand(const std::string& dir, bool initial) {
     std::vector<std::string> a = {"clang++", "-std=c++20", "-O0", "-I" + dir};
+    // Interactive games see the saved best score; replays never do, so they stay deterministic.
+    if (!opt.scripted) a.push_back("-I" + bestDir);
     if (initial) a.push_back("-DTS_SEED=" + std::to_string(opt.seed));
     if (opt.gridW) {
         a.push_back("-DTS_GRID_W=" + std::to_string(opt.gridW));
@@ -231,6 +237,7 @@ void compileSync(const std::string& dir, bool initial) {
 struct Info {
     int keys[5];
     bool terminal;
+    int tickMs;  // the tick length the game asks for
 };
 
 // Parse "keys a b c d e\nterminal t\n". Pure lookup data, no interpretation.
@@ -239,8 +246,8 @@ Info readInfo(const std::string& dir) {
     if (runCapture({dir + "/B", "info"}, &out) != 0) die("B info failed in %s", dir.c_str());
     Info in{};
     int t = 0;
-    if (std::sscanf(out.c_str(), "keys %d %d %d %d %d terminal %d", &in.keys[0], &in.keys[1],
-                    &in.keys[2], &in.keys[3], &in.keys[4], &t) != 6)
+    if (std::sscanf(out.c_str(), "keys %d %d %d %d %d terminal %d tick %d", &in.keys[0], &in.keys[1],
+                    &in.keys[2], &in.keys[3], &in.keys[4], &t, &in.tickMs) != 7)
         die("bad info output: %s", out.c_str());
     for (int k : in.keys)
         if (k < 0 || k > 2) die("bad slot in info output: %s", out.c_str());
@@ -325,6 +332,23 @@ int scriptKey(int tick) {
 int stalls = 0;
 double worstStallMs = 0;
 
+// This tick's length: the game's requested speed, or slower if compiles need it.
+int tickLength(const Info& info) {
+    return info.tickMs > opt.floorMs ? info.tickMs : opt.floorMs;
+}
+
+// At game over: the binary writes the updated best score (it decides the value).
+void saveBest(const std::string& binDir) {
+    if (opt.scripted) return;
+    mkdirP(bestDir);
+    std::string tmp = bestDir + "/best.hpp.new";
+    if (runCapture({binDir + "/B", "best", tmp}, nullptr) != 0) die("B best failed in %s", binDir.c_str());
+    if (std::rename(tmp.c_str(), (bestDir + "/best.hpp").c_str()) != 0)
+        die("rename %s: %s", tmp.c_str(), std::strerror(errno));
+}
+
+int shownTickMs = 0;
+
 void draw(int tick, const std::string& frame) {
     if (opt.scripted) {
         std::printf("--- tick %d\n%s", tick, frame.c_str());
@@ -336,7 +360,7 @@ void draw(int tick, const std::string& frame) {
     char status[160];
     std::snprintf(status, sizeof status,
                   " tick %d (%d ms)  stalls %d (worst %.0f ms)  [arrows/WASD, q quits]\x1b[K\n\x1b[J",
-                  tick, opt.tickMs, stalls, worstStallMs);
+                  tick, shownTickMs, stalls, worstStallMs);
     s += status;
     // Frames use '\n'; raw mode keeps OPOST so the terminal still returns the carriage.
     (void)!write(STDOUT_FILENO, s.data(), s.size());
@@ -355,9 +379,10 @@ int runNaive() {
 
     for (int tick = 0;; ++tick) {
         double tickStart = nowMs();
-        draw(tick, readFrame(cur));
         Info info = readInfo(cur);
-        if (info.terminal) return 0;
+        shownTickMs = tickLength(info);
+        draw(tick, readFrame(cur));
+        if (info.terminal) { saveBest(cur); return 0; }
         if (opt.scripted && tick >= (int)opt.script.size()) return 0;
 
         std::string emitDir = tickDir(tick, -1);
@@ -366,11 +391,11 @@ int runNaive() {
 
         int key;
         if (opt.scripted) {
-            if (!opt.noDelay) collectInput(tickStart + opt.tickMs, [] {});
+            if (!opt.noDelay) collectInput(tickStart + tickLength(info), [] {});
             key = scriptKey(tick);
         } else {
             decoder.last = KNone;
-            collectInput(tickStart + opt.tickMs, [] {});
+            collectInput(tickStart + tickLength(info), [] {});
             if (decoder.quit) return 0;
             key = decoder.last;
         }
@@ -476,7 +501,6 @@ void cancelJob(Job& j) {
 // three compiles in parallel, each followed by its first run. On macOS that
 // first run is slow and serialized (new executables are scanned), so the cost
 // differs a lot between machines and settings. Measure it instead of guessing.
-constexpr int MinTickMs = 200;   // classic Snake speed; never go faster
 constexpr int MaxTickMs = 1000;  // beyond this the game is unplayable anyway
 constexpr int CalibrationRounds = 2;
 constexpr double TickMargin = 1.1;
@@ -506,7 +530,7 @@ double calibrationRound(int round, const std::string& keepDir) {
     return t;
 }
 
-// Returns the tick length to use; leaves keepDir/B built from the initial state.
+// Returns the tick floor; leaves keepDir/B built from the initial state.
 int calibrate(const std::string& keepDir, double* measured) {
     double worst = 0;
     for (int r = 0; r < CalibrationRounds; ++r) {
@@ -515,10 +539,9 @@ int calibrate(const std::string& keepDir, double* measured) {
     }
     int tick = (int)(worst * TickMargin + PreWorkMs);
     tick = (tick + 9) / 10 * 10;  // round up to 10 ms
-    if (tick < MinTickMs) tick = MinTickMs;
     if (tick > MaxTickMs) tick = MaxTickMs;
     if (measured) *measured = worst;
-    logf("calibrated tick: %d ms (slowest round %.1f ms)", tick, worst);
+    logf("calibrated tick floor: %d ms (slowest round %.1f ms)", tick, worst);
     return tick;
 }
 
@@ -526,12 +549,12 @@ int runSpeculative() {
     std::string cur = tickDir(0, 0);
     mkdirP(cur);
     copyFile(opt.root + "/initial_state.hpp", cur + "/state.hpp");
-    if (opt.tickMs == 0) {
+    if (opt.floorMs < 0) {
         if (!opt.scripted) {
             static const char msg[] = "\x1b[Hmeasuring compile speed...\x1b[K";
             (void)!write(STDOUT_FILENO, msg, sizeof msg - 1);
         }
-        opt.tickMs = calibrate(cur, nullptr);
+        opt.floorMs = calibrate(cur, nullptr);
     } else {
         Job first = spawnJob(cur, true);
         waitJob(first);
@@ -542,9 +565,10 @@ int runSpeculative() {
     for (int tick = 0;; ++tick) {
         double tickStart = nowMs();
         // 1-2. draw, read key table and terminal flag
-        draw(tick, readFrame(cur));
         Info info = readInfo(cur);
-        if (info.terminal) return 0;
+        shownTickMs = tickLength(info);
+        draw(tick, readFrame(cur));
+        if (info.terminal) { saveBest(cur); return 0; }
         if (opt.scripted && tick >= (int)opt.script.size()) return 0;
 
         // 3. successor headers
@@ -565,11 +589,11 @@ int runSpeculative() {
         // 5. collect input until the tick ends
         int key;
         if (opt.scripted) {
-            if (!opt.noDelay) collectInput(tickStart + opt.tickMs, [&] { reapJobs(jobs, 3); });
+            if (!opt.noDelay) collectInput(tickStart + tickLength(info), [&] { reapJobs(jobs, 3); });
             key = scriptKey(tick);
         } else {
             decoder.last = KNone;
-            collectInput(tickStart + opt.tickMs, [&] { reapJobs(jobs, 3); });
+            collectInput(tickStart + tickLength(info), [&] { reapJobs(jobs, 3); });
             if (decoder.quit) {
                 for (auto& j : jobs) cancelJob(j);
                 return 0;
@@ -594,8 +618,9 @@ int runSpeculative() {
             if (std::fscanf(f, "%lf", &compiledAt) != 1) compiledAt = chosen.finished;
             std::fclose(f);
         }
-        logf("tick %d: pre %.1f ms, compile %.1f ms, warm %.1f ms, slot %d%s", tick,
-             spawned - tickStart, compiledAt - chosen.started, chosen.finished - compiledAt, slot,
+        logf("tick %d (%d ms): pre %.1f ms, compile %.1f ms, warm %.1f ms, slot %d%s", tick,
+             tickLength(info), spawned - tickStart, compiledAt - chosen.started,
+             chosen.finished - compiledAt, slot,
              wasReady ? "" : " (waited)");
         if (!wasReady && !opt.noDelay) {
             ++stalls;
@@ -646,7 +671,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto val = [&]() -> std::string { if (i + 1 >= argc) usage(); return argv[++i]; };
-        if (a == "--tick") opt.tickMs = std::atoi(val().c_str());
+        if (a == "--tick") opt.floorMs = std::atoi(val().c_str());
         else if (a == "--calibrate") opt.calibrateOnly = true;
         else if (a == "--seed") opt.seed = (unsigned)std::strtoul(val().c_str(), nullptr, 10);
         else if (a == "--script") { opt.scripted = true; opt.script = val(); }
@@ -660,9 +685,9 @@ int main(int argc, char** argv) {
         else if (a == "--log") opt.log = val();
         else usage();
     }
-    if (opt.tickMs < 0) usage();
+    if (opt.floorMs < -1) usage();
     // Timing doesn't matter for these; skip measuring.
-    if (opt.tickMs == 0 && (opt.naive || opt.noDelay)) opt.tickMs = MinTickMs;
+    if (opt.floorMs < 0 && (opt.naive || opt.noDelay)) opt.floorMs = 0;
 
     std::string logDir = opt.log.substr(0, opt.log.find_last_of('/'));
     if (logDir != opt.log) mkdirP(logDir);
@@ -671,7 +696,7 @@ int main(int argc, char** argv) {
     workDir = "tmp/run-" + std::to_string(getpid());
     mkdirP(workDir);
     logf("start pid %d tick %s seed %u %s", getpid(),
-         opt.tickMs ? (std::to_string(opt.tickMs) + " ms").c_str() : "auto", opt.seed,
+         opt.floorMs >= 0 ? (std::to_string(opt.floorMs) + " ms").c_str() : "auto", opt.seed,
          opt.naive ? "naive" : "speculative");
 
     if (opt.calibrateOnly) {
@@ -682,7 +707,7 @@ int main(int argc, char** argv) {
         removeDir(keep);
         rmdir(workDir.c_str());
         std::printf("one tick of work (3 parallel compiles + first runs): %.0f ms\n"
-                    "tick: %d ms%s\n", measured, tick,
+                    "tick floor: %d ms%s\n", measured, tick,
                     tick == MaxTickMs ? " (capped; expect stalls)" : "");
         return 0;
     }

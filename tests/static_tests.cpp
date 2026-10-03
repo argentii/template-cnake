@@ -4,6 +4,7 @@
 #include "../engine/rng.hpp"
 #include "../engine/game.hpp"
 #include "../engine/render.hpp"
+#include "../engine/serialize.hpp"
 
 namespace core_tests {
 using namespace ts;
@@ -324,7 +325,7 @@ static_assert(StrEq(Render<St>::frame,
     "|. . . . . . . . . . . . . . . . |\n"
     "|. . . . . . . . . . . . . . . . |\n"
     "+--------------------------------+\n"
-    " Score: 12\n"));
+    " Score: 12  Best: 0\n"));
 
 // Corner cells render (bounds of the paint loop)
 using Corners = Game<Dir::Down, Food<0, 0>, Seed<1>, Score<0>, Snake<P<W-1, H-1>, P<W-1, H-2>>>;
@@ -332,8 +333,48 @@ static_assert(Render<Corners>::frame[RowLen + 1] == CellFood);
 static_assert(Render<Corners>::frame[H * RowLen + 2 * W - 1] == CellHead);
 static_assert(Render<Corners>::frame[(H - 1) * RowLen + 2 * W - 1] == CellBody);
 
-static_assert(StrEq(Render<GameOver<5>>::frame, "\n  *** GAME OVER ***\n  Final score: 5\n\n"));
-static_assert(StrEq(Render<GameOver<191, true>>::frame, "\n  *** YOU WIN! ***\n  Final score: 191\n\n"));
+// Game over: shows the previous best, or "New best!" when beaten
+static_assert(StrEq(Render<GameOver<5>, Best<9>>::frame,
+                    "\n  *** GAME OVER ***\n  Final score: 5\n  Best: 9\n\n"));
+static_assert(StrEq(Render<GameOver<9>, Best<9>>::frame,
+                    "\n  *** GAME OVER ***\n  Final score: 9\n  Best: 9\n\n"));
+static_assert(StrEq(Render<GameOver<12>, Best<9>>::frame,
+                    "\n  *** GAME OVER ***\n  Final score: 12\n  New best!\n\n"));
+static_assert(StrEq(Render<GameOver<191, true>, Best<0>>::frame,
+                    "\n  *** YOU WIN! ***\n  Final score: 191\n  New best!\n\n"));
+static_assert(StrEq(Render<GameOver<0>>::frame,
+                    "\n  *** GAME OVER ***\n  Final score: 0\n  Best: 0\n\n"));
+// The live score line carries the best score
+using St7 = Game<Dir::Up, Food<0, 0>, Seed<1>, Score<3>, Snake<P<5,5>>>;
+static_assert(Render<St7, Best<42>>::frame[BoardLen + 17] == '4'
+           && Render<St7, Best<42>>::frame[BoardLen + 18] == '2');
 } // namespace render_tests
+
+namespace speed_and_best_tests {
+using namespace ts;
+template<int Sc> using G = Game<Dir::Up, Food<0, 0>, Seed<1>, Score<Sc>, Snake<P<5,5>>>;
+
+// Speed: starts at StartTickMs, faster per point, never below FastestTickMs
+static_assert(TickMs<G<0>> == StartTickMs);
+static_assert(TickMs<G<1>> == StartTickMs - TickStepMs);
+static_assert(TickMs<G<5>> < TickMs<G<4>>);
+static_assert(TickMs<G<1000>> == FastestTickMs);
+static_assert(TickMs<G<(StartTickMs - FastestTickMs) / TickStepMs>> == FastestTickMs);
+static_assert(TickMs<G<(StartTickMs - FastestTickMs) / TickStepMs - 1>> == FastestTickMs + TickStepMs);
+static_assert(TickMs<G<(StartTickMs - FastestTickMs) / TickStepMs - 1>> > FastestTickMs);
+static_assert(TickMs<GameOver<7>> == StartTickMs);  // unused, but defined
+
+// Best score
+static_assert(Same<NewBest<GameOver<5>, Best<9>>, Best<9>>);
+static_assert(Same<NewBest<GameOver<9>, Best<9>>, Best<9>>);
+static_assert(Same<NewBest<GameOver<12>, Best<9>>, Best<12>>);
+static_assert(Same<NewBest<GameOver<4, true>, Best<0>>, Best<4>>);
+static_assert(Same<NewBest<G<50>, Best<9>>, Best<9>>);  // only a finished game counts
+static_assert(IsNewBest<GameOver<10>, Best<9>> && !IsNewBest<GameOver<9>, Best<9>>);
+static_assert(!IsNewBest<G<50>, Best<9>>);
+
+// Best header text
+static_assert(StrEq(BestHeader<Best<17>>::text, "#pragma once\nusing BestScore = ts::Best<17>;\n"));
+} // namespace speed_and_best_tests
 
 int main() {}

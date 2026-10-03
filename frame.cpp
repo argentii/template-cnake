@@ -4,14 +4,21 @@
 //
 //   B              exit 0 (used by the driver to warm a fresh binary)
 //   B frame        print the rendered board and score
-//   B info         print "keys k0 k1 k2 k3 k4\nterminal t\n"
+//   B info         print "keys k0 k1 k2 k3 k4\nterminal t\ntick ms\n"
 //   B emit DIR     write DIR/succ0.hpp, succ1.hpp, succ2.hpp
+//   B best FILE    write FILE: best.hpp holding the best score once this state is reached
 #include <cstdio>
 #include <cstring>
 #include "engine/game.hpp"
 #include "engine/render.hpp"
 #include "engine/serialize.hpp"
 #include "state.hpp"
+// Best score of earlier games, if the driver supplied one.
+#if __has_include("best.hpp")
+#include "best.hpp"
+#else
+using BestScore = ts::Best<0>;
+#endif
 
 namespace {
 using namespace ts;
@@ -21,7 +28,8 @@ template<class S> struct Info {
     static constexpr auto text = Concat(
         Lit("keys "), IntStr<K::slots[0]>(), Lit(" "), IntStr<K::slots[1]>(), Lit(" "),
         IntStr<K::slots[2]>(), Lit(" "), IntStr<K::slots[3]>(), Lit(" "), IntStr<K::slots[4]>(),
-        Lit("\nterminal "), IntStr<IsTerminal<S> ? 1 : 0>(), Lit("\n"));
+        Lit("\nterminal "), IntStr<IsTerminal<S> ? 1 : 0>(),
+        Lit("\ntick "), IntStr<TickMs<S>>(), Lit("\n"));
 };
 
 struct Text { const char* data; int size; };
@@ -45,16 +53,21 @@ int put(const char* data, int size) {
     return std::fwrite(data, 1, size, stdout) == (size_t)size ? 0 : 1;
 }
 
+int writeFile(const char* path, const char* data, int size) {
+    FILE* f = std::fopen(path, "wb");
+    if (!f) { std::perror(path); return 1; }
+    size_t n = std::fwrite(data, 1, size, f);
+    if (std::fclose(f) != 0 || n != (size_t)size) { std::perror(path); return 1; }
+    return 0;
+}
+
 int emit(const char* dir) {
     using E = Emit<State>;
     if (E::count == 0) { std::fputs("emit: state is terminal\n", stderr); return 1; }
     for (int i = 0; i < E::count; ++i) {
         char path[4096];
         std::snprintf(path, sizeof path, "%s/succ%d.hpp", dir, i);
-        FILE* f = std::fopen(path, "wb");
-        if (!f) { std::perror(path); return 1; }
-        size_t n = std::fwrite(E::files[i].data, 1, E::files[i].size, f);
-        if (std::fclose(f) != 0 || n != (size_t)E::files[i].size) { std::perror(path); return 1; }
+        if (writeFile(path, E::files[i].data, E::files[i].size)) return 1;
     }
     return 0;
 }
@@ -62,9 +75,12 @@ int emit(const char* dir) {
 
 int main(int argc, char** argv) {
     if (argc < 2) return 0;
-    if (!std::strcmp(argv[1], "frame")) return put(Render<State>::frame.c, Render<State>::frame.size);
+    using R = Render<State, BestScore>;
+    using NB = BestHeader<NewBest<State, BestScore>>;
+    if (!std::strcmp(argv[1], "frame")) return put(R::frame.c, R::frame.size);
     if (!std::strcmp(argv[1], "info"))  return put(Info<State>::text.c, Info<State>::text.size);
     if (!std::strcmp(argv[1], "emit") && argc == 3) return emit(argv[2]);
-    std::fputs("usage: B [frame | info | emit DIR]\n", stderr);
+    if (!std::strcmp(argv[1], "best") && argc == 3) return writeFile(argv[2], NB::text.c, NB::text.size);
+    std::fputs("usage: B [frame | info | emit DIR | best FILE]\n", stderr);
     return 2;
 }

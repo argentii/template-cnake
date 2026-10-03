@@ -26,6 +26,8 @@ template<int N>        struct Score {};
 template<Dir D, class F, class S, class Sc, class Body> struct Game {};
 // Won is true only when the snake fills the whole board.
 template<int FinalScore, bool Won = false> struct GameOver {};
+// Best score from earlier games (generated best.hpp: using BestScore = ts::Best<N>;).
+template<int N> struct Best {};
 
 // ---- Basic predicates -------------------------------------------------------
 template<class A, class B> inline constexpr bool Same = false;

@@ -3,68 +3,69 @@
 |* . . . |
 |. o o @ |
 +--------+
- Score: 0
+ Score: 0  Best: 0
 --- tick 1
 +--------+
 |* . . @ |
 |. . o o |
 +--------+
- Score: 0
+ Score: 0  Best: 0
 --- tick 2
 +--------+
 |* . @ o |
 |. . . o |
 +--------+
- Score: 0
+ Score: 0  Best: 0
 --- tick 3
 +--------+
 |* @ o o |
 |. . . . |
 +--------+
- Score: 0
+ Score: 0  Best: 0
 --- tick 4
 +--------+
 |@ o o o |
 |. . * . |
 +--------+
- Score: 1
+ Score: 1  Best: 0
 --- tick 5
 +--------+
 |o o o . |
 |@ . * . |
 +--------+
- Score: 1
+ Score: 1  Best: 0
 --- tick 6
 +--------+
 |o o . . |
 |o @ * . |
 +--------+
- Score: 1
+ Score: 1  Best: 0
 --- tick 7
 +--------+
 |o o . * |
 |o o @ . |
 +--------+
- Score: 2
+ Score: 2  Best: 0
 --- tick 8
 +--------+
 |o . . * |
 |o o o @ |
 +--------+
- Score: 2
+ Score: 2  Best: 0
 --- tick 9
 +--------+
 |o . * @ |
 |o o o o |
 +--------+
- Score: 3
+ Score: 3  Best: 0
 --- tick 10
 +--------+
 |o * @ o |
 |o o o o |
 +--------+
- Score: 4
+ Score: 4  Best: 0
 --- tick 11
 
   *** YOU WIN! ***
   Final score: 5
+  New best!

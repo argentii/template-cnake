@@ -39,6 +39,12 @@ template<int Sc, bool Won> struct Serialize<GameOver<Sc, Won>> {
         Concat(Lit("ts::GameOver<"), IntStr<Sc>(), Lit(","), BoolName<Won>, Lit(">"));
 };
 
+template<class B> struct BestHeader;
+template<int N> struct BestHeader<Best<N>> {
+    static constexpr auto text =
+        Concat(Lit("#pragma once\nusing BestScore = ts::Best<"), IntStr<N>(), Lit(">;\n"));
+};
+
 template<class State> inline constexpr auto HeaderText =
     Concat(Lit("#pragma once\nusing State = "), Serialize<State>::type_text, Lit(";\n"));
 

@@ -91,6 +91,30 @@ struct KeyTable<Game<D, F, S, Sc, Body>> {
     };
 };
 
+// ---- Speed --------------------------------------------------------------------
+// The tick length the game asks for: it speeds up as the snake eats. The
+// driver can only go slower than this (when compiles can't keep up).
+inline constexpr int StartTickMs = 250;
+inline constexpr int TickStepMs  = 10;   // faster per point scored
+inline constexpr int FastestTickMs = 120;
+
+template<class State> inline constexpr int TickMs = StartTickMs;
+template<Dir D, class F, class S, int Sc, class Body>
+inline constexpr int TickMs<Game<D, F, S, Score<Sc>, Body>> =
+    StartTickMs - Sc * TickStepMs > FastestTickMs ? StartTickMs - Sc * TickStepMs : FastestTickMs;
+
+// ---- Best score -----------------------------------------------------------------
+// NewBest<State, Best<B>>: the best score once State is reached.
+template<class State, class B> struct NewBestT { using type = B; };
+template<int Sc, bool Won, int B> struct NewBestT<GameOver<Sc, Won>, Best<B>> {
+    using type = Best<(Sc > B ? Sc : B)>;
+};
+template<class State, class B> using NewBest = typename NewBestT<State, B>::type;
+
+template<class State, class B> inline constexpr bool IsNewBest = false;
+template<int Sc, bool Won, int B>
+inline constexpr bool IsNewBest<GameOver<Sc, Won>, Best<B>> = Sc > B;
+
 // ---- Initial state ----------------------------------------------------------
 // Snake of length 3 heading right in the middle-left of the board; food from Seed<N>.
 template<unsigned N> struct InitialT {
