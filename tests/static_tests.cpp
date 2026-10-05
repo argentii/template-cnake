@@ -218,7 +218,7 @@ static_assert(InBounds<Parts<Ate>::FoodP>);
 static_assert(!Same<Parts<Ate>::Seed_, Seed<77>>);
 
 // Death keeps the score
-static_assert(Same<Next<G<Dir::Right, 0, 0, 3, Snake<P<W-1,2>, P<W-2,2>>>, Dir::Right>, GameOver<3>>);
+static_assert(Same<Next<G<Dir::Right, 0, 0, 3, Snake<P<W-1,2>, P<W-2,2>>>, Dir::Right>, GameOver<3, false, Seed<77>>>);
 static_assert(IsTerminal<GameOver<3>> && IsTerminal<GameOver<9, true>>);
 static_assert(!IsTerminal<G<Dir::Up, 0, 0>>);
 
@@ -231,7 +231,7 @@ static_assert(Parts<Slot<1, Su>>::dir == Dir::Up);
 static_assert(Same<Parts<Slot<2, Su>>::Body_, Snake<P<5,6>, P<5,5>, P<4,5>>>);
 // A successor can be terminal: heading up at the top wall, straight dies
 using Top = Successors<G<Dir::Up, 9, 9, 2, Snake<P<4,0>, P<4,1>>>>;
-static_assert(Same<Slot<0, Top>, GameOver<2>>);
+static_assert(Same<Slot<0, Top>, GameOver<2, false, Seed<77>>>);
 static_assert(!IsTerminal<Slot<1, Top>> && !IsTerminal<Slot<2, Top>>);
 
 // Key table: order is None, Up, Down, Left, Right
@@ -265,7 +265,9 @@ template<int... I> struct RevCover<ISeq<int, I...>> { using type = Snake<C<W * H
 using AlmostFull = RevCover<MakeSeq<W * H - 1>>::type;
 static_assert(Same<Head<AlmostFull>, P<W-2, H-1>> && Length<AlmostFull> == W * H - 1);
 using Win = Next<Game<Dir::Right, Food<W-1, H-1>, Seed<5>, Score<40>, AlmostFull>, Dir::Right>;
-static_assert(Same<Win, GameOver<41, true>>);
+// The final seed is whatever the (failed) food spawn on the full board left.
+using WinSeed = SpawnFood<PushFront<P<W-1, H-1>, AlmostFull>, Seed<5>>::Seed;
+static_assert(Same<Win, GameOver<41, true, WinSeed>>);
 
 // Initial state: valid, length 3, food off the snake
 using I0 = Initial<1>;
@@ -376,5 +378,20 @@ static_assert(!IsNewBest<G<50>, Best<9>>);
 // Best header text
 static_assert(StrEq(BestHeader<Best<17>>::text, "#pragma once\nusing BestScore = ts::Best<17>;\n"));
 } // namespace speed_and_best_tests
+
+namespace restart_tests {
+using namespace ts;
+// A finished game restarts from the initial state, seeded by the final seed
+static_assert(Same<Restart<GameOver<3, false, Seed<77>>>, Initial<77>>);
+static_assert(Same<Restart<GameOver<9, true, Seed<5>>>, Initial<5>>);
+// Different final seeds give different games; the new game is live, score 0
+static_assert(!Same<Restart<GameOver<3, false, Seed<77>>>, Restart<GameOver<3, false, Seed<78>>>>);
+static_assert(!IsTerminal<Restart<GameOver<3, false, Seed<77>>>>);
+static_assert(Same<Restart<GameOver<3, false, Seed<77>>>, Initial<77>>);
+// Dying carries the seed through, so a real game restarts with a fresh sequence
+using Dead = Next<Game<Dir::Right, Food<0, 0>, Seed<1234>, Score<6>, Snake<P<W-1, 2>, P<W-2, 2>>>, Dir::Right>;
+static_assert(Same<Dead, GameOver<6, false, Seed<1234>>>);
+static_assert(Same<Restart<Dead>, Initial<1234>>);
+} // namespace restart_tests
 
 int main() {}

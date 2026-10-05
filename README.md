@@ -35,7 +35,8 @@ Run the driver from the repository root, because it compiles `frame.cpp` and
 `initial_state.hpp` from the current directory. It needs a real terminal, so
 start it from your shell, not from a tool that pipes stdin.
 
-**Controls:** arrow keys or WASD to steer, `q` or Ctrl-C to quit.
+**Controls:** arrow keys or WASD to steer, `q` or Ctrl-C to quit. On the
+game-over screen, `r` starts a new game with a fresh food sequence.
 
 Eat the `*` to grow and score. Each point makes the snake a little faster
 (250 ms per tick at the start, 10 ms faster per point, down to 120 ms). Hitting
@@ -72,7 +73,7 @@ build/driver --script "RRDDDDDDDD" --no-delay --seed 1
 ```cpp
 Game<Dir::Right, Food<8,8>, Seed<1015568748u>, Score<0>,
      Snake<P<6,6>, P<5,6>, P<4,6>>>      // head first
-GameOver<Score, Won>
+GameOver<Score, Won, Seed<N>>             // the final seed seeds the next game
 ```
 
 The rules are metafunctions over these types: `Step` (movement, growth,
@@ -98,6 +99,7 @@ constants baked in at compile time:
 | `B info` | the key table (`keys 0 1 2 0 0`), `terminal 0` or `1`, and the game's `tick` in ms |
 | `B emit DIR` | `succ0.hpp`, `succ1.hpp`, `succ2.hpp`: the three successor states as source |
 | `B best FILE` | the best-score header (`using BestScore = ts::Best<N>;`) once this state is reached |
+| `B restart FILE` | game over only: `state.hpp` for the next game's first state, seeded from this game's final seed |
 
 Each compile also includes `tmp/best/best.hpp` if it exists, so the board and
 the game-over screen can show the best score.
@@ -135,6 +137,8 @@ All game logic lives in types and template specializations. The driver
   (choosing the slower of two durations is timing, not game logic);
 - at game over, runs `B best` and moves the file it wrote into place. The
   binary decided whether the score is a new best;
+- on `r` at the game-over screen, runs `B restart` and compiles the state it
+  wrote. The binary picked the next game's seed;
 - prints the frame text and copies emitted headers into build directories.
 
 It never decides movement, growth, collisions, food placement, randomness,
@@ -149,7 +153,7 @@ into characters (`text.hpp`, `render.hpp`, `serialize.hpp`).
 engine/core.hpp       state types, list utilities (O(1) template depth)
 engine/step.hpp       movement, growth, wall and self collision
 engine/rng.hpp        LCG seed, food spawning
-engine/game.hpp       Next, Successors, KeyTable, TickMs, NewBest, Initial
+engine/game.hpp       Next, Successors, KeyTable, TickMs, NewBest, Initial, Restart
 engine/text.hpp       constexpr strings, int-to-chars, concat
 engine/render.hpp     state -> board text
 engine/serialize.hpp  state -> state.hpp source text

@@ -53,11 +53,11 @@ template<>          inline constexpr auto OverBanner<true> = Lit("\n  *** YOU WI
 template<bool IsNew, int B> inline constexpr auto BestLine = Concat(Lit("  Best: "), IntStr<B>(), Lit("\n"));
 template<int B>             inline constexpr auto BestLine<true, B> = Lit("  New best!\n");
 
-template<int Sc, bool Won, int B>
-struct Render<GameOver<Sc, Won>, Best<B>> {
+template<int Sc, bool Won, class S, int B>
+struct Render<GameOver<Sc, Won, S>, Best<B>> {
     static constexpr auto frame =
         Concat(OverBanner<Won>, Lit("  Final score: "), IntStr<Sc>(), Lit("\n"),
-               BestLine<IsNewBest<GameOver<Sc, Won>, Best<B>>, B>, Lit("\n"));
+               BestLine<IsNewBest<GameOver<Sc, Won, S>, Best<B>>, B>, Lit("\n"));
 };
 
 } // namespace ts

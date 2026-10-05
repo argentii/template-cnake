@@ -10,6 +10,7 @@
 //   --calibrate  measure, print the tick it would pick, and exit
 //   --grid WxH   board size passed to the compiler (3x2 to 63x63; default 16x12)
 //   --script  one input per tick: U D L R, or '.' for none; implies no terminal UI
+//   keys: arrows/WASD steer, q quits, r starts a new game from the game-over screen
 //   --no-delay  do not wait for the tick clock (replay as fast as compiles allow)
 #include <cerrno>
 #include <csignal>
@@ -275,6 +276,7 @@ struct KeyDecoder {
     int state = 0;  // 0 normal, 1 got ESC, 2 got ESC [
     int last = KNone;
     bool quit = false;
+    bool restart = false;  // only acted on at the game-over screen
     void feed(unsigned char c) {
         if (state == 1) { state = (c == '[' || c == 'O') ? 2 : 0; return; }
         if (state == 2) {
@@ -294,6 +296,7 @@ struct KeyDecoder {
             case 'a': case 'A': last = KLeft; break;
             case 'd': case 'D': last = KRight; break;
             case 'q': case 'Q': case 3: quit = true; break;
+            case 'r': case 'R': restart = true; break;
         }
     }
 };
@@ -349,7 +352,8 @@ void saveBest(const std::string& binDir) {
 
 int shownTickMs = 0;
 
-void draw(int tick, const std::string& frame) {
+// over: the game has ended; the status line offers restart instead of controls.
+void draw(int tick, const std::string& frame, bool over = false) {
     if (opt.scripted) {
         std::printf("--- tick %d\n%s", tick, frame.c_str());
         std::fflush(stdout);
@@ -358,12 +362,36 @@ void draw(int tick, const std::string& frame) {
     std::string s = "\x1b[H";
     s += frame;
     char status[160];
-    std::snprintf(status, sizeof status,
-                  " tick %d (%d ms)  stalls %d (worst %.0f ms)  [arrows/WASD, q quits]\x1b[K\n\x1b[J",
-                  tick, shownTickMs, stalls, worstStallMs);
+    if (over)
+        std::snprintf(status, sizeof status, "  [r] play again   [q] quit\x1b[K\n\x1b[J");
+    else
+        std::snprintf(status, sizeof status,
+                      " tick %d (%d ms)  stalls %d (worst %.0f ms)  [arrows/WASD, q quits]\x1b[K\n\x1b[J",
+                      tick, shownTickMs, stalls, worstStallMs);
     s += status;
     // Frames use '\n'; raw mode keeps OPOST so the terminal still returns the carriage.
     (void)!write(STDOUT_FILENO, s.data(), s.size());
+}
+
+// At the game-over screen: block until r (true) or q / Ctrl-C (false).
+bool waitForRestart() {
+    decoder.restart = false;
+    while (!decoder.restart && !decoder.quit) {
+        pollfd p{STDIN_FILENO, POLLIN, 0};
+        if (poll(&p, 1, 100) > 0 && (p.revents & POLLIN)) {
+            unsigned char buf[64];
+            ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+            for (ssize_t i = 0; i < n; ++i) decoder.feed(buf[i]);
+        }
+    }
+    return !decoder.quit;
+}
+
+// The finished game's binary writes the next game's first state (it picks the seed).
+void writeRestartState(const std::string& binDir, const std::string& newDir) {
+    mkdirP(newDir);
+    if (runCapture({binDir + "/B", "restart", newDir + "/state.hpp"}, nullptr) != 0)
+        die("B restart failed in %s", binDir.c_str());
 }
 
 std::string tickDir(int tick, int slot) {
@@ -377,12 +405,22 @@ int runNaive() {
     copyFile(opt.root + "/initial_state.hpp", cur + "/state.hpp");
     compileSync(cur, true);
 
-    for (int tick = 0;; ++tick) {
+    for (int tick = 0, gameStart = 0;; ++tick) {
         double tickStart = nowMs();
         Info info = readInfo(cur);
         shownTickMs = tickLength(info);
-        draw(tick, readFrame(cur));
-        if (info.terminal) { saveBest(cur); return 0; }
+        draw(tick - gameStart, readFrame(cur), info.terminal && !opt.scripted);
+        if (info.terminal) {
+            saveBest(cur);
+            if (opt.scripted || !waitForRestart()) return 0;
+            std::string next = tickDir(tick + 1, 0);
+            writeRestartState(cur, next);
+            compileSync(next, false);
+            removeDir(cur);
+            cur = next;
+            gameStart = tick + 1;
+            continue;
+        }
         if (opt.scripted && tick >= (int)opt.script.size()) return 0;
 
         std::string emitDir = tickDir(tick, -1);
@@ -562,13 +600,26 @@ int runSpeculative() {
         logf("initial compile+warm: %.1f ms", first.finished - first.started);
     }
 
-    for (int tick = 0;; ++tick) {
+    for (int tick = 0, gameStart = 0;; ++tick) {
         double tickStart = nowMs();
         // 1-2. draw, read key table and terminal flag
         Info info = readInfo(cur);
         shownTickMs = tickLength(info);
-        draw(tick, readFrame(cur));
-        if (info.terminal) { saveBest(cur); return 0; }
+        draw(tick - gameStart, readFrame(cur), info.terminal && !opt.scripted);
+        if (info.terminal) {
+            saveBest(cur);
+            if (opt.scripted || !waitForRestart()) return 0;
+            std::string next = tickDir(tick + 1, 0);
+            writeRestartState(cur, next);
+            Job j = spawnJob(next, false);
+            waitJob(j);
+            if (j.status != 0) die("compile failed in %s (status %d)", next.c_str(), j.status);
+            removeDir(cur);
+            cur = next;
+            gameStart = tick + 1;
+            logf("restart at tick %d", tick);
+            continue;
+        }
         if (opt.scripted && tick >= (int)opt.script.size()) return 0;
 
         // 3. successor headers

@@ -18,7 +18,7 @@ struct NextT<Game<D, Food<Fx, Fy>, S, Score<Sc>, Body>, ND> {
 
 // Died: the score stays as it was.
 template<bool Ate, class R, Dir ND, int Fx, int Fy, class S, int Sc>
-struct NextSel<true, Ate, R, ND, Fx, Fy, S, Sc> { using type = GameOver<Sc>; };
+struct NextSel<true, Ate, R, ND, Fx, Fy, S, Sc> { using type = GameOver<Sc, false, S>; };
 
 // Plain move: food, seed and score unchanged.
 template<class R, Dir ND, int Fx, int Fy, class S, int Sc>
@@ -29,7 +29,7 @@ struct NextSel<false, false, R, ND, Fx, Fy, S, Sc> {
 // Ate: score +1, respawn food; a full board is a win.
 template<bool Full, class Sp, class Body, Dir ND, int Sc> struct AteSel;
 template<class Sp, class Body, Dir ND, int Sc>
-struct AteSel<true, Sp, Body, ND, Sc> { using type = GameOver<Sc, true>; };
+struct AteSel<true, Sp, Body, ND, Sc> { using type = GameOver<Sc, true, typename Sp::Seed>; };
 template<class Sp, class Body, Dir ND, int Sc>
 struct AteSel<false, Sp, Body, ND, Sc> {
     using type = Game<ND, Food<Sp::Pos::x, Sp::Pos::y>, typename Sp::Seed, Score<Sc>, Body>;
@@ -66,7 +66,7 @@ template<int I, class Succ> using Slot = typename SlotT<I, Succ>::type;
 
 // ---- Terminal states --------------------------------------------------------
 template<class State> inline constexpr bool IsTerminal = false;
-template<int Sc, bool Won> inline constexpr bool IsTerminal<GameOver<Sc, Won>> = true;
+template<int Sc, bool Won, class S> inline constexpr bool IsTerminal<GameOver<Sc, Won, S>> = true;
 
 // ---- Key table --------------------------------------------------------------
 // Inputs, in table order. The driver only maps raw bytes to these indices.
@@ -106,14 +106,14 @@ inline constexpr int TickMs<Game<D, F, S, Score<Sc>, Body>> =
 // ---- Best score -----------------------------------------------------------------
 // NewBest<State, Best<B>>: the best score once State is reached.
 template<class State, class B> struct NewBestT { using type = B; };
-template<int Sc, bool Won, int B> struct NewBestT<GameOver<Sc, Won>, Best<B>> {
+template<int Sc, bool Won, class S, int B> struct NewBestT<GameOver<Sc, Won, S>, Best<B>> {
     using type = Best<(Sc > B ? Sc : B)>;
 };
 template<class State, class B> using NewBest = typename NewBestT<State, B>::type;
 
 template<class State, class B> inline constexpr bool IsNewBest = false;
-template<int Sc, bool Won, int B>
-inline constexpr bool IsNewBest<GameOver<Sc, Won>, Best<B>> = Sc > B;
+template<int Sc, bool Won, class S, int B>
+inline constexpr bool IsNewBest<GameOver<Sc, Won, S>, Best<B>> = Sc > B;
 
 // ---- Initial state ----------------------------------------------------------
 // Snake of length 3 heading right in the middle-left of the board; food from Seed<N>.
@@ -124,5 +124,14 @@ template<unsigned N> struct InitialT {
     using type = Game<Dir::Right, Food<Sp::Pos::x, Sp::Pos::y>, typename Sp::Seed, Score<0>, Body>;
 };
 template<unsigned N> using Initial = typename InitialT<N>::type;
+
+// ---- Restart ------------------------------------------------------------------
+// The first state of the next game, seeded from where this game's seed ended,
+// so each new game gets a different food sequence.
+template<class State> struct RestartT;
+template<int Sc, bool Won, unsigned N> struct RestartT<GameOver<Sc, Won, Seed<N>>> {
+    using type = Initial<N>;
+};
+template<class State> using Restart = typename RestartT<State>::type;
 
 } // namespace ts

@@ -7,6 +7,7 @@
 //   B info         print "keys k0 k1 k2 k3 k4\nterminal t\ntick ms\n"
 //   B emit DIR     write DIR/succ0.hpp, succ1.hpp, succ2.hpp
 //   B best FILE    write FILE: best.hpp holding the best score once this state is reached
+//   B restart FILE write FILE: state.hpp for the first state of the next game (terminal only)
 #include <cstdio>
 #include <cstring>
 #include "engine/game.hpp"
@@ -49,6 +50,16 @@ template<class S> struct Emit<S, true> {
     static constexpr int count = 0;
 };
 
+// The next game's first state; only a finished game has one.
+template<class S, bool Terminal = IsTerminal<S>> struct RestartFile {
+    static constexpr const char* data = nullptr;
+    static constexpr int size = 0;
+};
+template<class S> struct RestartFile<S, true> {
+    static constexpr const char* data = HeaderText<Restart<S>>.c;
+    static constexpr int size = HeaderText<Restart<S>>.size;
+};
+
 int put(const char* data, int size) {
     return std::fwrite(data, 1, size, stdout) == (size_t)size ? 0 : 1;
 }
@@ -81,6 +92,11 @@ int main(int argc, char** argv) {
     if (!std::strcmp(argv[1], "info"))  return put(Info<State>::text.c, Info<State>::text.size);
     if (!std::strcmp(argv[1], "emit") && argc == 3) return emit(argv[2]);
     if (!std::strcmp(argv[1], "best") && argc == 3) return writeFile(argv[2], NB::text.c, NB::text.size);
-    std::fputs("usage: B [frame | info | emit DIR | best FILE]\n", stderr);
+    if (!std::strcmp(argv[1], "restart") && argc == 3) {
+        using RF = RestartFile<State>;
+        if (!RF::data) { std::fputs("restart: state is not terminal\n", stderr); return 1; }
+        return writeFile(argv[2], RF::data, RF::size);
+    }
+    std::fputs("usage: B [frame | info | emit DIR | best FILE | restart FILE]\n", stderr);
     return 2;
 }

@@ -29,6 +29,14 @@ namespace c6 {
 #include "case6.hpp"
 }
 static_assert(ts::Same<c6::State, rt::Case<6>::type>, "round trip 6");
+namespace c7 {
+#include "case7.hpp"
+}
+static_assert(ts::Same<c7::State, rt::Case<7>::type>, "round trip 7");
+namespace c8 {
+#include "case8.hpp"
+}
+static_assert(ts::Same<c8::State, rt::Case<8>::type>, "round trip 8");
 namespace best {
 #include "best.hpp"
 }

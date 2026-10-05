@@ -24,8 +24,9 @@ template<unsigned N>   struct Seed {};
 template<int N>        struct Score {};
 
 template<Dir D, class F, class S, class Sc, class Body> struct Game {};
-// Won is true only when the snake fills the whole board.
-template<int FinalScore, bool Won = false> struct GameOver {};
+// Won is true only when the snake fills the whole board. S is the seed at the
+// end of the game; the next game's food sequence is derived from it.
+template<int FinalScore, bool Won = false, class S = Seed<0>> struct GameOver {};
 // Best score from earlier games (generated best.hpp: using BestScore = ts::Best<N>;).
 template<int N> struct Best {};
 

@@ -34,9 +34,10 @@ struct Serialize<Game<D, Food<Fx, Fy>, Seed<N>, Score<Sc>, Snake<P0, Ps...>>> {
 template<bool B> inline constexpr auto BoolName = Lit("false");
 template<>       inline constexpr auto BoolName<true> = Lit("true");
 
-template<int Sc, bool Won> struct Serialize<GameOver<Sc, Won>> {
+template<int Sc, bool Won, unsigned N> struct Serialize<GameOver<Sc, Won, Seed<N>>> {
     static constexpr auto type_text =
-        Concat(Lit("ts::GameOver<"), IntStr<Sc>(), Lit(","), BoolName<Won>, Lit(">"));
+        Concat(Lit("ts::GameOver<"), IntStr<Sc>(), Lit(","), BoolName<Won>,
+               Lit(",ts::Seed<"), IntStr<N>(), Lit("u>>"));
 };
 
 template<class B> struct BestHeader;
