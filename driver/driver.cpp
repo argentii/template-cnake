@@ -10,7 +10,7 @@
 //   --calibrate  measure, print the tick it would pick, and exit
 //   --grid WxH   board size passed to the compiler (3x2 to 63x63; default 16x12)
 //   --script  one input per tick: U D L R, or '.' for none; implies no terminal UI
-//   keys: arrows/WASD steer, q quits, r starts a new game from the game-over screen
+//   keys: arrows/WASD steer, p pauses, q quits, r starts a new game from the game-over screen
 //   --no-delay  do not wait for the tick clock (replay as fast as compiles allow)
 #include <cerrno>
 #include <csignal>
@@ -277,6 +277,7 @@ struct KeyDecoder {
     int last = KNone;
     bool quit = false;
     bool restart = false;  // only acted on at the game-over screen
+    bool paused = false;   // toggled by p
     void feed(unsigned char c) {
         if (state == 1) { state = (c == '[' || c == 'O') ? 2 : 0; return; }
         if (state == 2) {
@@ -297,25 +298,31 @@ struct KeyDecoder {
             case 'd': case 'D': last = KRight; break;
             case 'q': case 'Q': case 3: quit = true; break;
             case 'r': case 'R': restart = true; break;
+            case 'p': case 'P': paused = !paused; break;
         }
     }
 };
 KeyDecoder decoder;
 
-// Wait until the deadline, collecting keys. Calls onIdle(remainingMs) between polls.
+// Wait up to timeoutMs for keyboard bytes and feed them to the decoder.
+void pumpInput(int timeoutMs) {
+    pollfd p{STDIN_FILENO, POLLIN, 0};
+    if (poll(&p, 1, timeoutMs) > 0 && (p.revents & POLLIN)) {
+        unsigned char buf[64];
+        ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+        for (ssize_t i = 0; i < n; ++i) decoder.feed(buf[i]);
+    }
+}
+
+// Wait until the deadline, collecting keys; stops early on quit or (when
+// interactive) pause. Calls onWake() between polls.
 template<class F> void collectInput(double deadline, F onWake) {
     for (;;) {
         double left = deadline - nowMs();
-        if (left <= 0 || decoder.quit) return;
-        pollfd p{STDIN_FILENO, POLLIN, 0};
+        if (left <= 0 || decoder.quit || (!opt.scripted && decoder.paused)) return;
         int timeout = (int)left + 1;
         if (timeout > 5) timeout = 5;  // wake often enough to reap compiles
-        int r = poll(&p, 1, timeout);
-        if (r > 0 && (p.revents & POLLIN)) {
-            unsigned char buf[64];
-            ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
-            for (ssize_t i = 0; i < n; ++i) decoder.feed(buf[i]);
-        }
+        pumpInput(timeout);
         onWake();
     }
 }
@@ -352,8 +359,9 @@ void saveBest(const std::string& binDir) {
 
 int shownTickMs = 0;
 
-// over: the game has ended; the status line offers restart instead of controls.
-void draw(int tick, const std::string& frame, bool over = false) {
+enum class Screen { Playing, Paused, Over };
+
+void draw(int tick, const std::string& frame, Screen screen = Screen::Playing) {
     if (opt.scripted) {
         std::printf("--- tick %d\n%s", tick, frame.c_str());
         std::fflush(stdout);
@@ -362,11 +370,13 @@ void draw(int tick, const std::string& frame, bool over = false) {
     std::string s = "\x1b[H";
     s += frame;
     char status[160];
-    if (over)
+    if (screen == Screen::Over)
         std::snprintf(status, sizeof status, "  [r] play again   [q] quit\x1b[K\n\x1b[J");
+    else if (screen == Screen::Paused)
+        std::snprintf(status, sizeof status, "  PAUSED   [p] resume   [q] quit\x1b[K\n\x1b[J");
     else
         std::snprintf(status, sizeof status,
-                      " tick %d (%d ms)  stalls %d (worst %.0f ms)  [arrows/WASD, q quits]\x1b[K\n\x1b[J",
+                      " tick %d (%d ms)  stalls %d (worst %.0f ms)  [arrows/WASD, p pause, q quit]\x1b[K\n\x1b[J",
                       tick, shownTickMs, stalls, worstStallMs);
     s += status;
     // Frames use '\n'; raw mode keeps OPOST so the terminal still returns the carriage.
@@ -376,15 +386,29 @@ void draw(int tick, const std::string& frame, bool over = false) {
 // At the game-over screen: block until r (true) or q / Ctrl-C (false).
 bool waitForRestart() {
     decoder.restart = false;
-    while (!decoder.restart && !decoder.quit) {
-        pollfd p{STDIN_FILENO, POLLIN, 0};
-        if (poll(&p, 1, 100) > 0 && (p.revents & POLLIN)) {
-            unsigned char buf[64];
-            ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
-            for (ssize_t i = 0; i < n; ++i) decoder.feed(buf[i]);
-        }
-    }
+    while (!decoder.restart && !decoder.quit) pumpInput(100);
+    decoder.paused = false;
     return !decoder.quit;
+}
+
+// One tick of interactive input. On p the clock stops: the paused screen is
+// shown until p again (steering keys still count), then the tick restarts in
+// full so the player can react. onWake keeps running so compiles finish meanwhile.
+template<class F>
+void playerInput(double tickStart, int tickMs, int shownTick, const std::string& frame, F onWake) {
+    double deadline = tickStart + tickMs;
+    for (;;) {
+        collectInput(deadline, onWake);
+        if (!decoder.paused || decoder.quit) return;
+        draw(shownTick, frame, Screen::Paused);
+        while (decoder.paused && !decoder.quit) {
+            pumpInput(5);
+            onWake();
+        }
+        if (decoder.quit) return;
+        draw(shownTick, frame, Screen::Playing);
+        deadline = nowMs() + tickMs;
+    }
 }
 
 // The finished game's binary writes the next game's first state (it picks the seed).
@@ -409,7 +433,8 @@ int runNaive() {
         double tickStart = nowMs();
         Info info = readInfo(cur);
         shownTickMs = tickLength(info);
-        draw(tick - gameStart, readFrame(cur), info.terminal && !opt.scripted);
+        std::string frame = readFrame(cur);
+        draw(tick - gameStart, frame, info.terminal && !opt.scripted ? Screen::Over : Screen::Playing);
         if (info.terminal) {
             saveBest(cur);
             if (opt.scripted || !waitForRestart()) return 0;
@@ -433,7 +458,7 @@ int runNaive() {
             key = scriptKey(tick);
         } else {
             decoder.last = KNone;
-            collectInput(tickStart + tickLength(info), [] {});
+            playerInput(tickStart, tickLength(info), tick - gameStart, frame, [] {});
             if (decoder.quit) return 0;
             key = decoder.last;
         }
@@ -605,7 +630,8 @@ int runSpeculative() {
         // 1-2. draw, read key table and terminal flag
         Info info = readInfo(cur);
         shownTickMs = tickLength(info);
-        draw(tick - gameStart, readFrame(cur), info.terminal && !opt.scripted);
+        std::string frame = readFrame(cur);
+        draw(tick - gameStart, frame, info.terminal && !opt.scripted ? Screen::Over : Screen::Playing);
         if (info.terminal) {
             saveBest(cur);
             if (opt.scripted || !waitForRestart()) return 0;
@@ -644,7 +670,7 @@ int runSpeculative() {
             key = scriptKey(tick);
         } else {
             decoder.last = KNone;
-            collectInput(tickStart + tickLength(info), [&] { reapJobs(jobs, 3); });
+            playerInput(tickStart, tickLength(info), tick - gameStart, frame, [&] { reapJobs(jobs, 3); });
             if (decoder.quit) {
                 for (auto& j : jobs) cancelJob(j);
                 return 0;

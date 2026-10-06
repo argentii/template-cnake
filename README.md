@@ -35,8 +35,12 @@ Run the driver from the repository root, because it compiles `frame.cpp` and
 `initial_state.hpp` from the current directory. It needs a real terminal, so
 start it from your shell, not from a tool that pipes stdin.
 
-**Controls:** arrow keys or WASD to steer, `q` or Ctrl-C to quit. On the
-game-over screen, `r` starts a new game with a fresh food sequence.
+**Controls:** arrow keys or WASD to steer, `p` to pause and resume, `q` or
+Ctrl-C to quit. On the game-over screen, `r` starts a new game with a fresh
+food sequence.
+
+While paused, the clock stops but steering keys still register, so you can
+line up your next move. Resuming gives you a full tick to react.
 
 Eat the `*` to grow and score. Each point makes the snake a little faster
 (250 ms per tick at the start, 10 ms faster per point, down to 120 ms). Hitting
