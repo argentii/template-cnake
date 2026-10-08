@@ -27,11 +27,16 @@ jobs:
       - name: Static tests, serialize round trip, golden replays
         run: make test
 
-      - name: Golden replays (naive driver)
-        run: make golden DRIVER_ARGS=--naive
+      - name: Golden replays, each pipeline
+        run: |
+          make golden DRIVER_ARGS="--pipeline speculative"
+          make golden DRIVER_ARGS="--pipeline lookahead"
+          make golden DRIVER_ARGS="--pipeline naive"
 
       - name: Measured tick floor on this runner
-        run: build/driver --calibrate
+        run: |
+          build/driver --calibrate --pipeline speculative
+          build/driver --calibrate --pipeline lookahead
 
       - name: Driver log
         if: always()

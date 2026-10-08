@@ -3,7 +3,8 @@
 // the key->slot table, the terminal flag and the successor headers all come
 // out of the frame binary B(S), which the template engine computed.
 //
-// usage: driver [--tick MS] [--calibrate] [--seed N] [--script KEYS] [--no-delay] [--naive]
+// usage: driver [--tick MS] [--calibrate] [--seed N] [--script KEYS] [--no-delay]
+//               [--pipeline speculative|lookahead|naive] [--naive]
 //               [--grid WxH] [--root DIR] [--log FILE]
 //   --tick    slowest tick compiles need (floor); without it, measured at startup.
 //             The game sets its own speed (B info "tick") and is slowed to the floor if needed.
@@ -42,12 +43,34 @@ struct Options {
     bool scripted = false;
     std::string script;
     bool noDelay = false;
-    bool naive = false;
+    // speculative: 3 binaries per tick, one per possible move (the CLAUDE.md design).
+    // lookahead:   1 binary per tick that carries all 3 moves' outputs; needs
+    //              -DTS_LOOKAHEAD. Default on macOS, where every new binary costs
+    //              a serialized ~107 ms scan on its first run (see PERF.md).
+    // naive:       compile the chosen move only after the tick ends.
+    enum class Pipeline { Speculative, Lookahead, Naive };
+#ifdef __APPLE__
+    Pipeline pipeline = Pipeline::Lookahead;
+#else
+    Pipeline pipeline = Pipeline::Speculative;
+#endif
     std::string root = ".";
     int gridW = 0, gridH = 0;  // 0 = engine default
     std::string log = "tmp/driver.log";
 };
 Options opt;
+
+const char* pipelineName() {
+    switch (opt.pipeline) {
+        case Options::Pipeline::Speculative: return "speculative";
+        case Options::Pipeline::Lookahead: return "lookahead";
+        case Options::Pipeline::Naive: return "naive";
+    }
+    return "?";
+}
+
+// Compiles started per tick (what one tick of work costs).
+int jobsPerTick() { return opt.pipeline == Options::Pipeline::Lookahead ? 1 : 3; }
 
 // ---- clock & logging --------------------------------------------------------
 double nowMs() {
@@ -216,6 +239,7 @@ std::vector<std::string> compileCommand(const std::string& dir, bool initial) {
     // Interactive games see the saved best score; replays never do, so they stay deterministic.
     if (!opt.scripted) a.push_back("-I" + bestDir);
     if (initial) a.push_back("-DTS_SEED=" + std::to_string(opt.seed));
+    if (opt.pipeline == Options::Pipeline::Lookahead) a.push_back("-DTS_LOOKAHEAD");
     if (opt.gridW) {
         a.push_back("-DTS_GRID_W=" + std::to_string(opt.gridW));
         a.push_back("-DTS_GRID_H=" + std::to_string(opt.gridH));
@@ -242,9 +266,18 @@ struct Info {
 };
 
 // Parse "keys a b c d e\nterminal t\n". Pure lookup data, no interpretation.
-Info readInfo(const std::string& dir) {
+// B's argv for a command about target -1 (the binary's own state) or a
+// successor slot 0..2 of a lookahead build.
+std::vector<std::string> bArgs(const std::string& dir, int target, std::vector<std::string> cmd) {
+    std::vector<std::string> a = {dir + "/B"};
+    if (target >= 0) a.push_back("-c" + std::to_string(target));
+    for (auto& c : cmd) a.push_back(c);
+    return a;
+}
+
+Info readInfo(const std::string& dir, int target = -1) {
     std::string out;
-    if (runCapture({dir + "/B", "info"}, &out) != 0) die("B info failed in %s", dir.c_str());
+    if (runCapture(bArgs(dir, target, {"info"}), &out) != 0) die("B info failed in %s", dir.c_str());
     Info in{};
     int t = 0;
     if (std::sscanf(out.c_str(), "keys %d %d %d %d %d terminal %d tick %d", &in.keys[0], &in.keys[1],
@@ -256,9 +289,9 @@ Info readInfo(const std::string& dir) {
     return in;
 }
 
-std::string readFrame(const std::string& dir) {
+std::string readFrame(const std::string& dir, int target = -1) {
     std::string out;
-    if (runCapture({dir + "/B", "frame"}, &out) != 0) die("B frame failed in %s", dir.c_str());
+    if (runCapture(bArgs(dir, target, {"frame"}), &out) != 0) die("B frame failed in %s", dir.c_str());
     return out;
 }
 
@@ -348,11 +381,11 @@ int tickLength(const Info& info) {
 }
 
 // At game over: the binary writes the updated best score (it decides the value).
-void saveBest(const std::string& binDir) {
+void saveBest(const std::string& binDir, int target = -1) {
     if (opt.scripted) return;
     mkdirP(bestDir);
     std::string tmp = bestDir + "/best.hpp.new";
-    if (runCapture({binDir + "/B", "best", tmp}, nullptr) != 0) die("B best failed in %s", binDir.c_str());
+    if (runCapture(bArgs(binDir, target, {"best", tmp}), nullptr) != 0) die("B best failed in %s", binDir.c_str());
     if (std::rename(tmp.c_str(), (bestDir + "/best.hpp").c_str()) != 0)
         die("rename %s: %s", tmp.c_str(), std::strerror(errno));
 }
@@ -412,9 +445,9 @@ void playerInput(double tickStart, int tickMs, int shownTick, const std::string&
 }
 
 // The finished game's binary writes the next game's first state (it picks the seed).
-void writeRestartState(const std::string& binDir, const std::string& newDir) {
+void writeRestartState(const std::string& binDir, const std::string& newDir, int target = -1) {
     mkdirP(newDir);
-    if (runCapture({binDir + "/B", "restart", newDir + "/state.hpp"}, nullptr) != 0)
+    if (runCapture(bArgs(binDir, target, {"restart", newDir + "/state.hpp"}), nullptr) != 0)
         die("B restart failed in %s", binDir.c_str());
 }
 
@@ -561,7 +594,8 @@ void cancelJob(Job& j) {
 
 // ---- tick calibration ---------------------------------------------------------
 // The tick has to cover one tick's work: a few ms of B frame/info/emit, then
-// three compiles in parallel, each followed by its first run. On macOS that
+// the pipeline's compiles (3 in parallel, or 1 for lookahead), each followed by
+// its first run. On macOS that
 // first run is slow and serialized (new executables are scanned), so the cost
 // differs a lot between machines and settings. Measure it instead of guessing.
 constexpr int MaxTickMs = 1000;  // beyond this the game is unplayable anyway
@@ -569,27 +603,28 @@ constexpr int CalibrationRounds = 2;
 constexpr double TickMargin = 1.1;
 constexpr double PreWorkMs = 25;  // B frame + info + emit before compiles start
 
-// Time one round: three jobs on the initial state, until the last is warm.
-// The job in keepDir (if any) is left built for the game to start from.
+// Time one round: the pipeline's jobs on the initial state, until the last is
+// warm. The job in keepDir (if any) is left built for the game to start from.
 double calibrationRound(int round, const std::string& keepDir) {
+    const int n = jobsPerTick();
     std::string dirs[3];
     Job jobs[3];
     double t0 = nowMs();
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < n; ++i) {
         dirs[i] = (i == 0 && !keepDir.empty()) ? keepDir
                   : workDir + "/cal" + std::to_string(round) + "_" + std::to_string(i);
         mkdirP(dirs[i]);
         copyFile(opt.root + "/initial_state.hpp", dirs[i] + "/state.hpp");
         jobs[i] = spawnJob(dirs[i], true);
     }
-    for (auto& j : jobs) {
-        waitJob(j);
-        if (j.status != 0) die("compile failed in %s (status %d)", j.dir.c_str(), j.status);
+    for (int i = 0; i < n; ++i) {
+        waitJob(jobs[i]);
+        if (jobs[i].status != 0) die("compile failed in %s (status %d)", jobs[i].dir.c_str(), jobs[i].status);
     }
     double t = nowMs() - t0;
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < n; ++i)
         if (dirs[i] != keepDir) removeDir(dirs[i]);
-    logf("calibration round %d: 3 compiles + first runs in %.1f ms", round, t);
+    logf("calibration round %d: %d compile(s) + first runs in %.1f ms", round, n, t);
     return t;
 }
 
@@ -608,7 +643,9 @@ int calibrate(const std::string& keepDir, double* measured) {
     return tick;
 }
 
-int runSpeculative() {
+// Build (and warm) the binary for the initial state in tick 0's directory,
+// measuring the tick floor on the way unless --tick gave one.
+std::string buildFirstBinary() {
     std::string cur = tickDir(0, 0);
     mkdirP(cur);
     copyFile(opt.root + "/initial_state.hpp", cur + "/state.hpp");
@@ -624,6 +661,101 @@ int runSpeculative() {
         if (first.status != 0) die("initial compile failed (status %d)", first.status);
         logf("initial compile+warm: %.1f ms", first.finished - first.started);
     }
+    return cur;
+}
+
+// Compile DIR/state.hpp into a warm DIR/B and wait for it.
+void buildNow(const std::string& dir) {
+    Job j = spawnJob(dir, false);
+    waitJob(j);
+    if (j.status != 0) die("compile failed in %s (status %d)", dir.c_str(), j.status);
+}
+
+// ---- lookahead loop: one binary per tick ----------------------------------------
+// L(S) is built from state S and carries the outputs of S's three successors
+// (B -cN ...). The current state is always "successor `target` of binary `bin`"
+// (target -1 = bin's own state, only right after a (re)start).
+//
+// tick n:  draw + key table of the current state from `bin`
+//          if target >= 0: bin writes the current state's header; compile L(it)
+//          collect input; slot = keys[key]
+//          wait for L(current); it becomes `bin`, and target = slot
+// One compile and one first-run scan per tick instead of three.
+int runLookahead() {
+    std::string bin = buildFirstBinary();
+    int target = -1;
+
+    for (int tick = 0, gameStart = 0;; ++tick) {
+        double tickStart = nowMs();
+        Info info = readInfo(bin, target);
+        shownTickMs = tickLength(info);
+        std::string frame = readFrame(bin, target);
+        draw(tick - gameStart, frame, info.terminal && !opt.scripted ? Screen::Over : Screen::Playing);
+        if (info.terminal) {
+            saveBest(bin, target);
+            if (opt.scripted || !waitForRestart()) return 0;
+            std::string next = tickDir(tick + 1, 0);
+            writeRestartState(bin, next, target);
+            buildNow(next);
+            removeDir(bin);
+            bin = next;
+            target = -1;
+            gameStart = tick + 1;
+            logf("restart at tick %d", tick);
+            continue;
+        }
+        if (opt.scripted && tick >= (int)opt.script.size()) return 0;
+
+        // The binary for the current state. Right after a (re)start, bin is it.
+        bool compiling = target >= 0;
+        Job job;
+        if (compiling) {
+            std::string d = tickDir(tick + 1, 0);
+            mkdirP(d);
+            if (runCapture(bArgs(bin, target, {"state", d + "/state.hpp"}), nullptr) != 0)
+                die("B state failed in %s", bin.c_str());
+            job = spawnJob(d, false);
+        }
+        double spawned = nowMs();
+        auto reap = [&] { if (compiling) reapJobs(&job, 1); };
+
+        int key;
+        if (opt.scripted) {
+            if (!opt.noDelay) collectInput(tickStart + tickLength(info), reap);
+            key = scriptKey(tick);
+        } else {
+            decoder.last = KNone;
+            playerInput(tickStart, tickLength(info), tick - gameStart, frame, reap);
+            if (decoder.quit) {
+                if (compiling) cancelJob(job);
+                return 0;
+            }
+            key = decoder.last;
+        }
+        int slot = info.keys[key];
+
+        if (compiling) {
+            double waitStart = nowMs();
+            bool wasReady = job.done;
+            waitJob(job);
+            double stall = nowMs() - waitStart;
+            if (job.status != 0) die("compile failed in %s (status %d)", job.dir.c_str(), job.status);
+            logf("tick %d (%d ms): pre %.1f ms, compile+warm %.1f ms, slot %d%s", tick, tickLength(info),
+                 spawned - tickStart, job.finished - job.started, slot, wasReady ? "" : " (waited)");
+            if (!wasReady && !opt.noDelay) {
+                ++stalls;
+                if (stall > worstStallMs) worstStallMs = stall;
+                logf("STALL tick %d: waited %.1f ms", tick, stall);
+            }
+            removeDir(bin);
+            bin = job.dir;
+        }
+        target = slot;
+    }
+}
+
+int runSpeculative() {
+    std::string cur = buildFirstBinary();
 
     for (int tick = 0, gameStart = 0;; ++tick) {
         double tickStart = nowMs();
@@ -737,7 +869,8 @@ void sweepStaleRuns() {
 }
 
 void usage() {
-    std::fputs("usage: driver [--tick MS] [--calibrate] [--seed N] [--script KEYS] [--no-delay] [--naive]\n"
+    std::fputs("usage: driver [--tick MS] [--calibrate] [--seed N] [--script KEYS] [--no-delay]\n"
+               "              [--pipeline speculative|lookahead|naive] [--naive]\n"
                "              [--grid WxH] [--root DIR] [--log FILE]\n", stderr);
     std::exit(2);
 }
@@ -753,7 +886,14 @@ int main(int argc, char** argv) {
         else if (a == "--seed") opt.seed = (unsigned)std::strtoul(val().c_str(), nullptr, 10);
         else if (a == "--script") { opt.scripted = true; opt.script = val(); }
         else if (a == "--no-delay") opt.noDelay = true;
-        else if (a == "--naive") opt.naive = true;
+        else if (a == "--naive") opt.pipeline = Options::Pipeline::Naive;
+        else if (a == "--pipeline") {
+            std::string v = val();
+            if (v == "speculative") opt.pipeline = Options::Pipeline::Speculative;
+            else if (v == "lookahead") opt.pipeline = Options::Pipeline::Lookahead;
+            else if (v == "naive") opt.pipeline = Options::Pipeline::Naive;
+            else usage();
+        }
         else if (a == "--root") opt.root = val();
         else if (a == "--grid") {
             if (std::sscanf(val().c_str(), "%dx%d", &opt.gridW, &opt.gridH) != 2) usage();
@@ -764,7 +904,7 @@ int main(int argc, char** argv) {
     }
     if (opt.floorMs < -1) usage();
     // Timing doesn't matter for these; skip measuring.
-    if (opt.floorMs < 0 && (opt.naive || opt.noDelay)) opt.floorMs = 0;
+    if (opt.floorMs < 0 && (opt.pipeline == Options::Pipeline::Naive || opt.noDelay)) opt.floorMs = 0;
 
     std::string logDir = opt.log.substr(0, opt.log.find_last_of('/'));
     if (logDir != opt.log) mkdirP(logDir);
@@ -774,7 +914,7 @@ int main(int argc, char** argv) {
     mkdirP(workDir);
     logf("start pid %d tick %s seed %u %s", getpid(),
          opt.floorMs >= 0 ? (std::to_string(opt.floorMs) + " ms").c_str() : "auto", opt.seed,
-         opt.naive ? "naive" : "speculative");
+         pipelineName());
 
     if (opt.calibrateOnly) {
         std::string keep = tickDir(0, 0);
@@ -783,8 +923,9 @@ int main(int argc, char** argv) {
         int tick = calibrate(keep, &measured);
         removeDir(keep);
         rmdir(workDir.c_str());
-        std::printf("one tick of work (3 parallel compiles + first runs): %.0f ms\n"
-                    "tick floor: %d ms%s\n", measured, tick,
+        std::printf("one tick of work (%s pipeline: %d compile%s + first run%s): %.0f ms\n"
+                    "tick floor: %d ms%s\n", pipelineName(), jobsPerTick(), jobsPerTick() > 1 ? "s" : "",
+                    jobsPerTick() > 1 ? "s" : "", measured, tick,
                     tick == MaxTickMs ? " (capped; expect stalls)" : "");
         return 0;
     }
@@ -793,7 +934,9 @@ int main(int argc, char** argv) {
     std::atexit([] { killAllChildren(); restoreTerminal(); });
     if (!opt.scripted) enterRawMode();
 
-    int rc = opt.naive ? runNaive() : runSpeculative();
+    int rc = opt.pipeline == Options::Pipeline::Naive       ? runNaive()
+           : opt.pipeline == Options::Pipeline::Lookahead   ? runLookahead()
+                                                            : runSpeculative();
 
     restoreTerminal();
     if (!opt.scripted && stalls) std::printf("stalls: %d (worst %.0f ms), see %s\n", stalls, worstStallMs, opt.log.c_str());

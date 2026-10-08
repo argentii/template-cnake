@@ -72,3 +72,23 @@ default of 450 ms.
 On the M4: rounds take 391–430 ms; the picked tick was 470–500 ms. Two timed
 59-tick replays at the picked tick (480 and 490 ms) had 0 stalls. A 1.25×
 margin rounded to 50 ms gave 550–600 ms, slower than needed.
+
+## Lookahead pipeline (one binary per tick)
+
+Tick floor from `--calibrate` on the M4 (2 runs each):
+
+| pipeline | work per tick | measured | floor |
+|---|---|---|---|
+| speculative | 3 compiles + 3 first runs | 418–423 ms | 490 ms |
+| lookahead | 1 compile + 1 first run | 202–206 ms | 250–260 ms |
+
+The lookahead binary costs little extra to compile (median, 7 runs):
+
+| length | B | L (`-DTS_LOOKAHEAD`) |
+|---|---|---|
+| 3 | 44 ms | 48 ms |
+| 100 | 64 ms | 70 ms |
+
+Timed 58-tick replay, lookahead, at the game's own speed (240–250 ms, floor 0):
+0 stalls; compile + first run median 192 ms, p90 198 ms, max 231 ms. The real
+floor is about 200–235 ms, so the speed-up (down to 120 ms) is capped there.

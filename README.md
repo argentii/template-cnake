@@ -58,7 +58,8 @@ the game-over screen. `make clean` keeps it; delete that file to reset it.
 | `--calibrate` | Measure, print the floor the driver would pick, and exit. |
 | `--grid WxH` | Board size, 3x2 up to 63x63 (default 16x12). |
 | `--seed N` | Food sequence seed (default 1). |
-| `--naive` | Compile the next state only after the tick ends. Slow and stuttery; for debugging. |
+| `--pipeline NAME` | `speculative` (3 binaries per tick, default on Linux), `lookahead` (1 binary per tick, default on macOS) or `naive`. See below. |
+| `--naive` | Same as `--pipeline naive`: compile the next state only after the tick ends. Slow and stuttery; for debugging. |
 | `--script KEYS` | Non-interactive replay: one input per tick, `U` `D` `L` `R` or `.` for none. Prints every frame. Replays ignore and never change the saved best score. |
 | `--no-delay` | With `--script`: don't wait for the tick clock, run as fast as compiles allow. |
 | `--root DIR` | Directory holding `frame.cpp` and `initial_state.hpp` (default `.`). |
@@ -127,6 +128,23 @@ end of tick:
 Compiles run one tick ahead, so the player never waits for the compiler
 unless a compile is slower than a tick.
 
+### The lookahead pipeline (default on macOS)
+
+macOS scans every new binary on its first run, one at a time, so three new
+binaries per tick cost about 400 ms. Built with `-DTS_LOOKAHEAD`, a binary
+compiled from state `S` also carries the frame, key table and state header of
+each of `S`'s three successors, selected with `-cN`:
+
+```
+B -cN frame | info | state FILE | best FILE | restart FILE     (N = slot 0..2)
+```
+
+Each tick, the current state's frame and key table come from the previous
+binary (`-c<slot>`), and the driver compiles one binary from that state's
+header. That's one compile and one scan per tick. The templates still compute
+everything; the driver still only picks `-c<keys[key]>`. All golden replays
+produce identical output under all three pipelines.
+
 ### The purity rule
 
 All game logic lives in types and template specializations. The driver
@@ -178,8 +196,8 @@ make test
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same suite on Ubuntu and macOS on
-every push, runs the golden replays against the naive driver too, and prints
-each runner's measured tick floor.
+every push, runs the golden replays under all three pipelines, and prints each
+runner's measured tick floor.
 
 - **Static tests** (`tests/static_tests.cpp`): `static_assert`s for every
   metafunction. If the file compiles, they pass.
@@ -206,8 +224,11 @@ the floor.
 
 **macOS:** macOS scans every newly built executable on its first run, one at a
 time (about 107 ms each, more under load). Three new binaries per tick costs
-about 400 ms, so the floor on an M4 comes out around 480–500 ms. That's slower
-than the game's own speed, so on macOS the speed-up isn't visible by default.
+about 400 ms, so the speculative pipeline's floor on an M4 is around 490 ms.
+The lookahead pipeline (the macOS default) needs one binary per tick, and its
+floor comes out around 250 ms: the game runs at its own starting speed, but the
+speed-up is capped near there, because one compile plus its first run takes
+about 190–230 ms.
 The driver runs each fresh binary once during the tick to hide that cost. If
 you add your terminal app under System Settings → Privacy & Security →
 Developer Tools, the scan goes away, the floor should drop below the game's
